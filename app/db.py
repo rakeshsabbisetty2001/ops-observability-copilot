@@ -71,7 +71,10 @@ CREATE TABLE IF NOT EXISTS ground_truth_anomalies (
     magnitude DOUBLE
 );
 """
-GROUND_TRUTH_SCHEMA_SQL = GROUND_TRUTH_TABLE_SQL
+# ground_truth.duckdb holds exactly this one table, so write_to_db's own
+# DROP+CREATE of it is the only schema setup that file ever needs — no
+# separate init function (Epic 1-2 review round 2, nit #5: the previous
+# init_ground_truth_schema had no callers and was dead code).
 
 # Tables the text-to-SQL layer is allowed to query (see Epic 5's guardrail).
 QUERYABLE_TABLES = frozenset({"events", "detected_anomalies"})
@@ -90,7 +93,3 @@ def get_ground_truth_connection(read_only: bool) -> duckdb.DuckDBPyConnection:
 
 def init_schema(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute(SCHEMA_SQL)
-
-
-def init_ground_truth_schema(conn: duckdb.DuckDBPyConnection) -> None:
-    conn.execute(GROUND_TRUTH_SCHEMA_SQL)

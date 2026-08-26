@@ -26,8 +26,11 @@ def test_ground_truth_within_range_and_non_overlapping():
 
 
 def test_generate_is_deterministic():
-    e1, g1 = generate(seed=7, days=1, interval_minutes=15)
-    e2, g2 = generate(seed=7, days=1, interval_minutes=15)
+    # days=2 comfortably clears the window-fitting guard (round 2 review, #4)
+    # — days=1 at this interval was a borderline config that only worked by
+    # luck of the retry loop, exactly the kind of case the guard now rejects.
+    e1, g1 = generate(seed=7, days=2, interval_minutes=15)
+    e2, g2 = generate(seed=7, days=2, interval_minutes=15)
     assert e1["value"].tolist() == e2["value"].tolist()
     assert g1["magnitude"].tolist() == g2["magnitude"].tolist()
 

@@ -22,6 +22,7 @@ from app.db import (
     GROUND_TRUTH_TABLE_SQL,
     get_connection,
     get_ground_truth_connection,
+    init_schema,
 )
 
 SERVICES = ["checkout-api", "payments-worker", "auth-service"]
@@ -48,10 +49,14 @@ def _seasonal_component(ts: pd.Timestamp, amplitude: float) -> float:
 
 def _pick_anomaly_windows(rng: random.Random, n_points: int, n: int, min_len: int, max_len: int):
     """Pick n non-overlapping (start_idx, end_idx) windows into a series of n_points."""
-    if n_points <= max_len:
+    # Fitting n non-overlapping windows of up to max_len needs roughly n * max_len
+    # points, not just max_len (Epic 1-2 review round 2, #4 — the single-window
+    # bound let e.g. --days 1 --interval-minutes 30 through, then crashed with
+    # an opaque "only placed 2/3 windows" further down).
+    if n_points <= n * max_len:
         raise ValueError(
-            f"n_points ({n_points}) must exceed max_len ({max_len}) — increase --days or "
-            f"decrease --interval-minutes"
+            f"n_points ({n_points}) too small to fit {n} non-overlapping windows of up to "
+            f"{max_len} points each — increase --days or decrease --interval-minutes"
         )
     windows: list[tuple[int, int]] = []
     attempts = 0
@@ -98,7 +103,13 @@ def generate(seed: int = 42, days: int = 14, interval_minutes: int = 5) -> tuple
                     attempted = rng.uniform(3.0, 6.0) * std
                     values[start_idx:end_idx] += attempted
                 elif anomaly_type == "dip":
-                    attempted = rng.uniform(3.0, 6.0) * std
+                    # Cap so the dip can't crush the window flat against the
+                    # floor (baseline - attempted must clear vmin by >=1 std) —
+                    # error_rate's baseline (0.3) is only ~3 std above its own
+                    # floor (0), so an uncapped 3-6 std dip always bottomed out
+                    # at a constant-zero line (Epic 1-2 review round 2, #2).
+                    max_dip = max(baseline - vmin - std, std)
+                    attempted = min(rng.uniform(3.0, 6.0) * std, max_dip)
                     values[start_idx:end_idx] -= attempted
                 else:  # sustained_drift
                     # A ramp's *mean* effect over its window is only attempted/2, so
@@ -125,7 +136,12 @@ def generate(seed: int = 42, days: int = 14, interval_minutes: int = 5) -> tuple
                 elif anomaly_type == "dip":
                     theoretical = -min(attempted, window_base_mean - vmin)
                 else:  # sustained_drift: unclipped mean effect is attempted/2
-                    theoretical = attempted / 2
+                    # Same clipping-awareness as spike, halved — a ramp that
+                    # would push the window mean past vmax gets bounded like a
+                    # spike does. Doesn't currently bind at these parameters,
+                    # but leaving it exact avoids a landmine if the drift
+                    # multiplier or a bound ever changes (round 2, nit #6).
+                    theoretical = (min(attempted, vmax - window_base_mean) if math.isfinite(vmax) else attempted) / 2
                 tolerance = 3.0 * std / math.sqrt(end_idx - start_idx)
                 assert abs(realized - theoretical) < tolerance, (
                     f"{anomaly_type} for {service}/{metric_name}: realized shift {realized:.4f} doesn't "
@@ -182,10 +198,16 @@ def _residuals(events_df: pd.DataFrame) -> pd.Series:
 
 
 def _validate(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
-    """Real assertions, not comments — catches off-by-one windows, a no-op
-    injection (see the per-window check above, in generate()), and here,
-    corruption introduced between the in-memory arrays and the final DataFrame
-    (e.g. a column-order mismatch, a rounding artifact, a bad id)."""
+    """Real assertions, not comments — catches off-by-one windows and
+    corruption introduced between the in-memory arrays and the final
+    DataFrame (e.g. a column-order mismatch, a rounding artifact, a bad id).
+    This is NOT the no-op-injection detector — that's the exact (non-
+    statistical) check inside generate()'s per-window loop, which compares
+    the realized effect against the independently-known rng-drawn target.
+    This check instead cross-validates the *recorded* magnitude against an
+    independently-recomputed observed shift; at a no-op both numbers would
+    read ~0 and agree, so on its own it has poor power against that failure
+    mode (round 2 review, #3)."""
     assert not events_df.empty and not gt_df.empty, "generation produced no rows"
 
     ts_min, ts_max = events_df["ts"].min(), events_df["ts"].max()
@@ -221,8 +243,13 @@ def _validate(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
             # sampling error — unlike the in-generate() check above, this one
             # compares against the *aggregate* baseline, not this window's own
             # pre-injection values, so both terms belong in the tolerance.
+            # 6 sigma (P ~= 2e-9 per window, ~3e-8 per run at 17 windows) — 4
+            # sigma flaked ~1% of production-scale runs (seeds 21/49/74) on a
+            # plain statistical tail, not clipping as first suspected (round 2
+            # review, #3 — re-derived and confirmed the formula itself is
+            # correct empirically, only the threshold was too tight).
             standard_error = clean_std * np.sqrt(1.0 / n_win + 1.0 / n_clean)
-            assert abs(observed - expected) < 4.0 * standard_error, (
+            assert abs(observed - expected) < 6.0 * standard_error, (
                 f"recorded magnitude for {row['anomaly_type']} on {service}/{metric} doesn't match what's "
                 f"actually in the persisted events (observed {observed:.4f} vs expected {expected:.4f})"
             )
@@ -238,6 +265,12 @@ def write_to_db(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
     try:
         conn.execute("BEGIN TRANSACTION")
         try:
+            # detected_anomalies + query_log, IF NOT EXISTS — a targeted
+            # DROP+CREATE of just `events` below must not leave the other two
+            # tables uncreated (Epic 1-2 review round 2, #1: this call was
+            # dropped by the round-1 rewrite and silently deleted both tables
+            # from the shipped corpus).
+            init_schema(conn)
             conn.execute("DROP TABLE IF EXISTS events")
             conn.execute(EVENTS_TABLE_SQL)
             conn.execute(

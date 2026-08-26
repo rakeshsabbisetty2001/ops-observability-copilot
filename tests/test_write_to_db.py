@@ -45,6 +45,21 @@ def test_ground_truth_not_in_ops_db(temp_db_paths):
     conn.close()
 
 
+def test_ops_db_has_all_its_own_tables(temp_db_paths):
+    """Round 2 review, #1: a targeted DROP+CREATE of just `events` silently
+    dropped init_schema() from write_to_db, which deleted detected_anomalies
+    and query_log from the shipped corpus — the prior test only asserted what
+    must NOT be there, never what must."""
+    ops_path, _ = temp_db_paths
+    events_df, gt_df = generate(seed=1, days=2, interval_minutes=15)
+    write_to_db(events_df, gt_df)
+
+    conn = duckdb.connect(ops_path, read_only=True)
+    tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+    assert tables == {"events", "detected_anomalies", "query_log"}
+    conn.close()
+
+
 def test_read_only_blocks_external_access(temp_db_paths):
     """Epic 1-2 review #1: read_only alone doesn't stop COPY TO / read_csv_auto
     — enable_external_access=false must be set for the API's connection mode."""
