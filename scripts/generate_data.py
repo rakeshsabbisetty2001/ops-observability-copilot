@@ -2,25 +2,37 @@
 
 The detector (Epic 3) never sees ground_truth_anomalies — it's written here,
 before detection ever runs, specifically so the eval (Epic 4) has an honest
-answer key that wasn't derived from the thing being graded.
+answer key that wasn't derived from the thing being graded. It also lives in
+a separate DuckDB file the API never opens (see app/db.py) — the answer key
+is physically unreachable from the text-to-SQL path, not just excluded by a
+guardrail regex.
 
 Usage: python -m scripts.generate_data [--seed 42] [--days 14] [--interval-minutes 5]
 """
 import argparse
+import math
 import random
 from datetime import timedelta
 
 import numpy as np
 import pandas as pd
 
-from app.db import get_connection, init_schema
+from app.db import (
+    EVENTS_TABLE_SQL,
+    GROUND_TRUTH_TABLE_SQL,
+    get_connection,
+    get_ground_truth_connection,
+)
 
 SERVICES = ["checkout-api", "payments-worker", "auth-service"]
 METRICS = {
     # baseline: normal mean. std: normal noise. seasonal_amp: daily swing (0 = none).
-    "latency_ms": {"baseline": 120.0, "std": 15.0, "seasonal_amp": 30.0},
-    "error_rate": {"baseline": 0.3, "std": 0.1, "seasonal_amp": 0.0},
-    "cpu_pct": {"baseline": 35.0, "std": 5.0, "seasonal_amp": 10.0},
+    # min/max: physically valid range — real-world quantities can't go negative,
+    # rates/percentages are capped (Epic 1-2 review #6: uncapped noise produced
+    # negative error rates in the committed corpus).
+    "latency_ms": {"baseline": 120.0, "std": 15.0, "seasonal_amp": 30.0, "min": 0.0, "max": math.inf},
+    "error_rate": {"baseline": 0.3, "std": 0.1, "seasonal_amp": 0.0, "min": 0.0, "max": 1.0},
+    "cpu_pct": {"baseline": 35.0, "std": 5.0, "seasonal_amp": 10.0, "min": 0.0, "max": 100.0},
 }
 ANOMALY_TYPES = ["spike", "dip", "sustained_drift"]
 START_TS = pd.Timestamp("2026-08-01 00:00:00")
@@ -36,22 +48,28 @@ def _seasonal_component(ts: pd.Timestamp, amplitude: float) -> float:
 
 def _pick_anomaly_windows(rng: random.Random, n_points: int, n: int, min_len: int, max_len: int):
     """Pick n non-overlapping (start_idx, end_idx) windows into a series of n_points."""
+    if n_points <= max_len:
+        raise ValueError(
+            f"n_points ({n_points}) must exceed max_len ({max_len}) — increase --days or "
+            f"decrease --interval-minutes"
+        )
     windows: list[tuple[int, int]] = []
     attempts = 0
     while len(windows) < n and attempts < 200:
         attempts += 1
         length = rng.randint(min_len, max_len)
-        start_idx = rng.randint(0, n_points - length - 1)
+        start_idx = rng.randint(0, n_points - length)  # end_idx can reach n_points - 1 inclusive
         end_idx = start_idx + length
         if any(not (end_idx < w[0] or start_idx > w[1]) for w in windows):
             continue  # overlaps an existing window for this (service, metric) — retry
         windows.append((start_idx, end_idx))
+    assert len(windows) == n, f"only placed {len(windows)}/{n} non-overlapping windows after 200 attempts"
     return windows
 
 
 def generate(seed: int = 42, days: int = 14, interval_minutes: int = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
     rng = random.Random(seed)
-    np.random.seed(seed)
+    rng_np = np.random.default_rng(seed)  # not the legacy global RNG — no side effect on other callers
 
     n_points = int(days * 24 * 60 / interval_minutes)
     timestamps = [START_TS + timedelta(minutes=interval_minutes * i) for i in range(n_points)]
@@ -63,28 +81,56 @@ def generate(seed: int = 42, days: int = 14, interval_minutes: int = 5) -> tuple
     for service in SERVICES:
         for metric_name, cfg in METRICS.items():
             baseline, std, amp = cfg["baseline"], cfg["std"], cfg["seasonal_amp"]
+            vmin, vmax = cfg["min"], cfg["max"]
 
-            values = np.array(
-                [baseline + _seasonal_component(ts, amp) + np.random.normal(0, std) for ts in timestamps]
+            base = np.array(
+                [baseline + _seasonal_component(ts, amp) + rng_np.normal(0, std) for ts in timestamps]
             )
+            values = base.copy()
 
             n_anomalies = rng.randint(1, 3)
             windows = _pick_anomaly_windows(rng, n_points, n_anomalies, min_len=6, max_len=36)
 
+            anomaly_specs = []  # (start_idx, end_idx, anomaly_type, attempted_effect)
             for start_idx, end_idx in windows:
                 anomaly_type = rng.choice(ANOMALY_TYPES)
                 if anomaly_type == "spike":
-                    magnitude = rng.uniform(3.0, 6.0) * std
-                    values[start_idx:end_idx] += magnitude
+                    attempted = rng.uniform(3.0, 6.0) * std
+                    values[start_idx:end_idx] += attempted
                 elif anomaly_type == "dip":
-                    magnitude = rng.uniform(3.0, 6.0) * std
-                    values[start_idx:end_idx] = np.maximum(values[start_idx:end_idx] - magnitude, 0.0)
+                    attempted = rng.uniform(3.0, 6.0) * std
+                    values[start_idx:end_idx] -= attempted
                 else:  # sustained_drift
-                    # A ramp's *mean* effect over its window is only magnitude/2, so
+                    # A ramp's *mean* effect over its window is only attempted/2, so
                     # needs a higher floor than spike/dip to stay reliably detectable
-                    # (verified by fuzzing generate() across seeds/window lengths).
-                    magnitude = rng.uniform(3.0, 5.0) * std
-                    values[start_idx:end_idx] += np.linspace(0, magnitude, end_idx - start_idx)
+                    # (verified by fuzzing generate() across 200 seeds).
+                    attempted = rng.uniform(3.0, 5.0) * std
+                    values[start_idx:end_idx] += np.linspace(0, attempted, end_idx - start_idx)
+                anomaly_specs.append((start_idx, end_idx, anomaly_type, attempted))
+
+            values = np.clip(values, vmin, vmax)
+
+            for start_idx, end_idx, anomaly_type, attempted in anomaly_specs:
+                window_base_mean = base[start_idx:end_idx].mean()
+                realized = float(values[start_idx:end_idx].mean() - window_base_mean)
+
+                # Independent sanity check: the *attempted* effect (known from the
+                # rng draw, not measured from the array) vs what actually landed,
+                # accounting for clipping analytically. Catches a silently no-op'd
+                # injection (realized ~= 0 while theoretical is clearly not) —
+                # comparing against the *recorded* magnitude instead would be
+                # self-referential, since both would read ~0 (Epic 1-2 review #4).
+                if anomaly_type == "spike":
+                    theoretical = min(attempted, vmax - window_base_mean) if math.isfinite(vmax) else attempted
+                elif anomaly_type == "dip":
+                    theoretical = -min(attempted, window_base_mean - vmin)
+                else:  # sustained_drift: unclipped mean effect is attempted/2
+                    theoretical = attempted / 2
+                tolerance = 3.0 * std / math.sqrt(end_idx - start_idx)
+                assert abs(realized - theoretical) < tolerance, (
+                    f"{anomaly_type} for {service}/{metric_name}: realized shift {realized:.4f} doesn't "
+                    f"match theoretical {theoretical:.4f} (±{tolerance:.4f}) — injection likely no-op'd"
+                )
 
                 gt_rows.append(
                     {
@@ -94,13 +140,13 @@ def generate(seed: int = 42, days: int = 14, interval_minutes: int = 5) -> tuple
                         "start_ts": timestamps[start_idx],
                         "end_ts": timestamps[end_idx - 1],
                         "anomaly_type": anomaly_type,
-                        "magnitude": float(magnitude),
+                        "magnitude": abs(realized),  # the REAL post-clip effect, not the attempted target
                     }
                 )
                 gt_id += 1
 
             for i, ts in enumerate(timestamps):
-                is_anomalous = any(s <= i < e for s, e in windows)
+                is_anomalous = any(s <= i < e for s, e, _, _ in anomaly_specs)
                 roll = rng.random()
                 if is_anomalous:
                     level = "error" if roll < 0.4 else ("warn" if roll < 0.8 else "info")
@@ -136,7 +182,12 @@ def _residuals(events_df: pd.DataFrame) -> pd.Series:
 
 
 def _validate(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
-    """Real assertions, not comments — catches off-by-one windows or a no-op injection."""
+    """Real assertions, not comments — catches off-by-one windows, a no-op
+    injection (see the per-window check above, in generate()), and here,
+    corruption introduced between the in-memory arrays and the final DataFrame
+    (e.g. a column-order mismatch, a rounding artifact, a bad id)."""
+    assert not events_df.empty and not gt_df.empty, "generation produced no rows"
+
     ts_min, ts_max = events_df["ts"].min(), events_df["ts"].max()
     assert (gt_df["start_ts"] >= ts_min).all() and (gt_df["end_ts"] <= ts_max).all(), (
         "ground-truth window falls outside the generated event range"
@@ -149,14 +200,6 @@ def _validate(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
         for (_, e1), (s2, _) in zip(windows, windows[1:]):
             assert e1 < s2, f"overlapping ground-truth windows for {service}/{metric}"
 
-        # An injection that didn't actually move the data would silently make the
-        # detector eval meaningless. Compare each window's residual MEAN (value
-        # with baseline+seasonal already subtracted, so no daily-cycle confound)
-        # against a clean residual baseline (this metric's own points minus every
-        # one of its anomaly windows) using a standard-error-scaled threshold —
-        # a plain fixed multiple of std would spuriously fail short windows
-        # where a real-but-small ramp is comparable in size to per-point noise
-        # (the mean over the window converges even when the median doesn't).
         all_mask = (events_df["service"] == service) & (events_df["metric_name"] == metric)
         in_any_window = pd.Series(False, index=events_df.index)
         for _, w in group.iterrows():
@@ -166,26 +209,64 @@ def _validate(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
         if clean_std <= 0:
             clean_std = METRICS[metric]["std"]
 
+        n_clean = len(clean)
         for _, row in group.iterrows():
             win_mask = all_mask & (events_df["ts"] >= row["start_ts"]) & (events_df["ts"] <= row["end_ts"])
             n_win = int(win_mask.sum())
             win_mean = residual.loc[win_mask].mean()
-            standard_error = clean_std / np.sqrt(n_win)
-            assert abs(win_mean - clean_mean) > 2.0 * standard_error, (
-                f"injected {row['anomaly_type']} for {service}/{metric} did not measurably move the data"
+            observed = win_mean - clean_mean
+            expected = row["magnitude"] if row["anomaly_type"] in ("spike", "sustained_drift") else -row["magnitude"]
+            # observed's own noise has two independent sources: this window's
+            # actual (uncancelled) noise realization, and clean_mean's own
+            # sampling error — unlike the in-generate() check above, this one
+            # compares against the *aggregate* baseline, not this window's own
+            # pre-injection values, so both terms belong in the tolerance.
+            standard_error = clean_std * np.sqrt(1.0 / n_win + 1.0 / n_clean)
+            assert abs(observed - expected) < 4.0 * standard_error, (
+                f"recorded magnitude for {row['anomaly_type']} on {service}/{metric} doesn't match what's "
+                f"actually in the persisted events (observed {observed:.4f} vs expected {expected:.4f})"
             )
 
 
 def write_to_db(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
+    # DROP + CREATE + INSERT in one transaction, not DELETE + INSERT: DuckDB's
+    # primary-key index does not see a same-transaction DELETE when checking a
+    # same-key INSERT right after (a documented DuckDB index limitation,
+    # reproduced directly while building this) — a fresh table sidesteps it
+    # and gives the same "old data or new data, never a mix" guarantee.
     conn = get_connection(read_only=False)
     try:
-        init_schema(conn)
-        conn.execute("DELETE FROM events")
-        conn.execute("DELETE FROM ground_truth_anomalies")
-        conn.execute("INSERT INTO events SELECT * FROM events_df")
-        conn.execute("INSERT INTO ground_truth_anomalies SELECT * FROM gt_df")
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            conn.execute("DROP TABLE IF EXISTS events")
+            conn.execute(EVENTS_TABLE_SQL)
+            conn.execute(
+                "INSERT INTO events (id, ts, service, metric_name, value, level, message) "
+                "SELECT id, ts, service, metric_name, value, level, message FROM events_df"
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
         conn.close()
+
+    gt_conn = get_ground_truth_connection(read_only=False)
+    try:
+        gt_conn.execute("BEGIN TRANSACTION")
+        try:
+            gt_conn.execute("DROP TABLE IF EXISTS ground_truth_anomalies")
+            gt_conn.execute(GROUND_TRUTH_TABLE_SQL)
+            gt_conn.execute(
+                "INSERT INTO ground_truth_anomalies (id, service, metric_name, start_ts, end_ts, anomaly_type, magnitude) "
+                "SELECT id, service, metric_name, start_ts, end_ts, anomaly_type, magnitude FROM gt_df"
+            )
+            gt_conn.execute("COMMIT")
+        except Exception:
+            gt_conn.execute("ROLLBACK")
+            raise
+    finally:
+        gt_conn.close()
 
 
 if __name__ == "__main__":
