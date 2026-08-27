@@ -109,7 +109,11 @@ def generate(seed: int = 42, days: int = 14, interval_minutes: int = 5) -> tuple
                     # floor (0), so an uncapped 3-6 std dip always bottomed out
                     # at a constant-zero line (Epic 1-2 review round 2, #2).
                     max_dip = max(baseline - vmin - std, std)
-                    attempted = min(rng.uniform(3.0, 6.0) * std, max_dip)
+                    # Scale the draw, don't truncate it — truncating collapsed
+                    # error_rate's dip depth to a hard constant (every draw
+                    # exceeded the cap), erasing that cell's magnitude spread
+                    # for Epic 4's eval (round 3 review, #2).
+                    attempted = rng.uniform(3.0, 6.0) * min(std, max_dip / 6.0)
                     values[start_idx:end_idx] -= attempted
                 else:  # sustained_drift
                     # A ramp's *mean* effect over its window is only attempted/2, so
@@ -273,6 +277,11 @@ def write_to_db(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
             init_schema(conn)
             conn.execute("DROP TABLE IF EXISTS events")
             conn.execute(EVENTS_TABLE_SQL)
+            # detected_anomalies is DERIVED from events (its sample_event_ids
+            # point into it) — a regenerate must not leave stale rows pointing
+            # at ids that no longer exist. query_log is an audit trail and
+            # deliberately survives a regenerate (round 3 review, #3).
+            conn.execute("DELETE FROM detected_anomalies")
             conn.execute(
                 "INSERT INTO events (id, ts, service, metric_name, value, level, message) "
                 "SELECT id, ts, service, metric_name, value, level, message FROM events_df"
