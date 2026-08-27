@@ -12,6 +12,7 @@ there (recall 15/17, precision 16/17 on the current corpus).
 Usage: python -m eval.eval_detector
 """
 import json
+from pathlib import Path
 
 import pandas as pd
 
@@ -19,6 +20,8 @@ from app.db import get_connection, get_ground_truth_connection
 from app.detection import rolling_zscore, seasonal_residual
 from scripts.generate_data import METRICS
 from scripts.run_detector import merge_detections
+
+_RESULTS_JSON_PATH = Path(__file__).with_name("detector_results.json")
 
 
 def _overlaps(a_start, a_end, b_start, b_end) -> bool:
@@ -50,9 +53,13 @@ def match(det: pd.DataFrame, gt: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """Returns (gt_hit, det_hit): per-row bool Series, aligned to det/gt's own
     index. No early exit on either loop — a ground-truth window matched by
     several detections must mark all of them (real case on this corpus: gt
-    window 9 is split across two rolling_zscore onset/recovery fragments),
-    and a detection spanning several ground-truth windows must mark all of
-    those too (doesn't occur on this corpus, verified separately)."""
+    window 9, payments-worker/latency_ms spike, is covered by two
+    seasonal_residual rows separated by a 45-minute sub-threshold gap wider
+    than _MERGE_GAP_TOLERANCE's 30 minutes, so merge_detections correctly
+    leaves them as two rows — not rolling_zscore self-absorption, which
+    doesn't touch this window at all), and a detection spanning several
+    ground-truth windows must mark all of those too (doesn't occur on this
+    corpus, verified separately)."""
     gt_hit = pd.Series(False, index=gt.index)
     det_hit = pd.Series(False, index=det.index)
     for gi, g in gt.iterrows():
@@ -135,17 +142,36 @@ def run_eval() -> dict:
     # different, and much easier to misread, quantity (Epic 4 review round
     # 1, #1: the post-merge view reports rolling_zscore as 0/1, implying
     # 0.000 precision, when its real standalone precision is 5/6 = 0.833).
+    # Reused across the window=144 sweep below (round 2, nit #8: was
+    # computed twice) and computed from the SAME detect() calls used to
+    # build the window=144 merge, so the two sections can't drift apart.
+    seasonal_df = seasonal_residual.detect(events_df)
+    zscore_df = rolling_zscore.detect(events_df)
+    zscore_144_df = rolling_zscore.detect(events_df, window=144)
+
     by_method_premerge = {}
     for name, pre_merge_df in (
-        ("rolling_zscore", rolling_zscore.detect(events_df)),
-        ("seasonal_residual", seasonal_residual.detect(events_df)),
+        ("rolling_zscore (window=48, shipped default)", zscore_df),
+        ("rolling_zscore (window=144)", zscore_144_df),
+        ("seasonal_residual", seasonal_df),
     ):
-        _, pre_hit = match(pre_merge_df, gt)
-        by_method_premerge[name] = {
-            "n": len(pre_merge_df),
-            "tp": int(pre_hit.sum()),
-            "precision": (pre_hit.sum() / len(pre_merge_df)) if len(pre_merge_df) else float("nan"),
-        }
+        pre_gt_hit, pre_det_hit = match(pre_merge_df, gt)
+        # compute_metrics, not a hand-rolled ratio (round 2, nit #9) — reuses
+        # the same NaN-on-undefined convention nit #8 pinned with a test.
+        by_method_premerge[name] = compute_metrics(pre_gt_hit, pre_det_hit)
+
+    # Tripwire: this eval's own detect() calls must actually be the same
+    # detector run that produced the committed detected_anomalies, or the
+    # per-detector breakdown above silently describes a different detector
+    # than the overall numbers below it (round 2, #3 — true today only
+    # because both call sites happen to use the same defaults; nothing
+    # enforced that before this assertion).
+    reconstructed = merge_detections(zscore_df, seasonal_df)
+    assert len(reconstructed) == len(det), (
+        f"eval_detector's own detect() calls produced {len(reconstructed)} merged rows but "
+        f"detected_anomalies has {len(det)} — scripts/run_detector.py's parameters have "
+        f"drifted from this eval's; re-run python -m scripts.run_detector or update this module"
+    )
 
     by_method_postmerge = {}
     for method, sub in det.groupby("method"):
@@ -154,11 +180,13 @@ def run_eval() -> dict:
 
     # Architecture doc's explicit Epic 4 ask: report the window=144 sweep
     # point, since it measures strictly better on this corpus but wasn't
-    # made the default (Epic 4 review round 1, #4).
-    zscore_144 = rolling_zscore.detect(events_df, window=144)
-    merged_144 = merge_detections(zscore_144, seasonal_residual.detect(events_df))
+    # made the default (Epic 4 review round 1, #4). This is the POST-MERGE
+    # figure — the standalone rolling_zscore@144 number is in
+    # by_method_premerge above (round 2, #2: these two numbers are
+    # different quantities and both are worth reporting).
+    merged_144 = merge_detections(zscore_144_df, seasonal_df)
     gt_hit_144, det_hit_144 = match(merged_144, gt)
-    window_144 = compute_metrics(gt_hit_144, det_hit_144)
+    window_144_merged = compute_metrics(gt_hit_144, det_hit_144)
 
     return {
         "overall": compute_metrics(gt_hit, det_hit),
@@ -166,7 +194,7 @@ def run_eval() -> dict:
         "by_type_bucket": by_type_bucket,
         "by_method_premerge": by_method_premerge,
         "by_method_postmerge": by_method_postmerge,
-        "window_144": window_144,
+        "window_144_merged": window_144_merged,
         "false_positives": det.loc[~det_hit],
         "missed": gt.loc[~gt_hit],
     }
@@ -186,16 +214,17 @@ if __name__ == "__main__":
     for (t, b), m in result["by_type_bucket"].items():
         print(f"  {t}/{b}: {m['hits']}/{m['n']} = {m['recall']:.3f}")
 
-    print("\nPer-detector precision (measured BEFORE merge_detections' '+' join):")
+    print("\nPer-detector precision, standalone (measured BEFORE merge_detections' '+' join):")
     for name, m in result["by_method_premerge"].items():
-        print(f"  {name}: {m['tp']}/{m['n']} = {m['precision']:.3f}")
+        print(f"  {name}: {m['tp_precision']}/{m['n_det']} precision = {m['precision']:.3f}, "
+              f"{m['tp_recall']}/{m['n_gt']} recall = {m['recall']:.3f}")
 
     print("\nPer merged-row method combination (POST-merge; a '+' row is one both detectors caught):")
     for method, m in result["by_method_postmerge"].items():
         print(f"  {method}: {m['hits']}/{m['n']} rows hit a ground-truth window")
 
-    w144 = result["window_144"]
-    print(f"\nrolling_zscore window=144 sweep point (not the shipped default): "
+    w144 = result["window_144_merged"]
+    print(f"\nMerged table at rolling_zscore window=144 (not the shipped default), post-merge: "
           f"recall {w144['tp_recall']}/{w144['n_gt']} = {w144['recall']:.3f}, "
           f"precision {w144['tp_precision']}/{w144['n_det']} = {w144['precision']:.3f}")
 
@@ -209,16 +238,22 @@ if __name__ == "__main__":
 
     # Written for reproducibility (Epic 4 review round 1, #6) — the .md is
     # prose that cites this, not a hand-transcription nothing else checks.
+    # NaN precision/recall (only reachable on an empty corpus, not this one)
+    # would serialize as a bare `NaN` token, which json.dump accepts but
+    # which isn't valid per the JSON spec — a known, currently-unreachable
+    # edge case (round 2, nit #7), not fixed since nothing on this corpus
+    # exercises it and a real fix (None-coercion) would obscure the NaN
+    # convention compute_metrics deliberately uses.
     json_result = {
         "overall": result["overall"],
         "by_type": result["by_type"],
         "by_type_bucket": {f"{t}|{b}": m for (t, b), m in result["by_type_bucket"].items()},
         "by_method_premerge": result["by_method_premerge"],
         "by_method_postmerge": result["by_method_postmerge"],
-        "window_144": result["window_144"],
-        "false_positives": result["false_positives"][["service", "metric_name", "start_ts", "end_ts", "method", "score"]].astype(str).to_dict("records"),
+        "window_144_merged": result["window_144_merged"],
+        "false_positives": result["false_positives"][["service", "metric_name", "start_ts", "end_ts", "method", "score"]].to_dict("records"),
         "missed": result["missed"][["service", "metric_name", "anomaly_type", "magnitude"]].to_dict("records"),
     }
-    with open("eval/detector_results.json", "w") as f:
+    with open(_RESULTS_JSON_PATH, "w") as f:
         json.dump(json_result, f, indent=2, default=str)
-    print("\nWrote eval/detector_results.json")
+    print(f"\nWrote {_RESULTS_JSON_PATH}")

@@ -13,7 +13,7 @@ Match definition: any temporal overlap between a detected window and a ground-tr
 | F1 | 0.911 |
 | False positives | 1 |
 
-16 detections cover 15 distinct ground-truth anomalies — one anomaly (`payments-worker/latency_ms` spike) is split across an onset detection and a recovery detection, exactly the fragmentation `rolling_zscore.py`'s docstring predicts. Both fragments count as true positives (both genuinely overlap the real anomaly), so this is 16 hits, not 16 anomalies found.
+16 detections cover 15 distinct ground-truth anomalies — one anomaly (`payments-worker/latency_ms` spike, ground-truth window 9) is covered by two `seasonal_residual` rows separated by a 45-minute sub-threshold gap, wider than `_MERGE_GAP_TOLERANCE`'s 30 minutes, so `merge_detections` correctly leaves them as two rows. (This is not `rolling_zscore`'s onset/recovery self-absorption — `rolling_zscore` doesn't detect this window at all; that fragmentation mode is real and documented but happens not to be what produced this particular case.) Both fragments count as true positives (both genuinely overlap the real anomaly), so this is 16 hits, not 16 anomalies found.
 
 ## By anomaly type (recall only)
 
@@ -40,14 +40,15 @@ Bucketed on magnitude **in units of the metric's own noise (σ)**, not raw units
 
 **Both missed windows are `error_rate` dips at 1.33σ and 1.96σ — below the detection floor by construction, not a detector failure.** `error_rate`'s tight [0,1] bound forces small dips to avoid flatlining against the floor, a known limitation documented in the architecture doc *before* this eval ran. No z-score-based detector at any reasonable threshold reliably catches a sub-2σ shift. The `dip/above_median` hit (`payments-worker/latency_ms`, an unbounded metric, 4.11σ) shows the detectors work correctly on dips that aren't fighting a floor.
 
-## Per-detector precision (measured before merging)
+## Per-detector precision (standalone, measured before merging)
 
 | Detector | Precision | Recall (of all 17) |
 |---|---|---|
-| `rolling_zscore` (standalone, window=48) | 5/6 = 0.833 | 5/17 |
-| `seasonal_residual` (standalone) | 26/26 = 1.000 | 15/17 |
+| `rolling_zscore` (window=48, shipped default) | 5/6 = 0.833 | 5/17 |
+| `rolling_zscore` (window=144) | **11/11 = 1.000** | **9/17** |
+| `seasonal_residual` | 26/26 = 1.000 | 15/17 |
 
-**`rolling_zscore` is corroborating, not additive, on this corpus.** Every ground-truth window it finds is one `seasonal_residual` already found (0 unique recall at every window size from 24 to 288 samples, measured during Epic 3's review). Its honest contribution is "confirms 5 of the 15 found windows" — a real, reportable finding about how the two methods relate on this data, not a flaw in either method.
+**`rolling_zscore` is corroborating, not additive, on this corpus, at either window.** Every ground-truth window it finds — at window=48 or window=144 — is one `seasonal_residual` already found (0 unique recall at every window size from 24 to 288 samples, measured during Epic 3's review; verified again here that `rolling_zscore`'s window=144 hit set is a strict subset of `seasonal_residual`'s). Its honest contribution is "confirms N of the 15 found windows" — a real, reportable finding about how the two methods relate on this data, not a flaw in either method. `window=144` confirms nearly twice as many (9 vs 5) at perfect standalone precision, which is why the merged table below looks better at that setting too.
 
 ## Per merged-row method combination (post-merge — different from the table above)
 
@@ -61,9 +62,9 @@ This is **not** `rolling_zscore`'s own precision (that's the table above, 0.833)
 
 ## The window=144 alternative
 
-The architecture doc flagged this as worth reporting: `rolling_zscore` at `window=144` (12h baseline instead of the shipped 4h) measures **strictly better** on this corpus:
+The architecture doc flagged this as worth reporting: `rolling_zscore` at `window=144` (12h baseline instead of the shipped 4h) measures **strictly better** on this corpus, both standalone (table above) and merged into the full pipeline:
 
-| Config | Recall | Precision | False positives |
+| Config (post-merge, full pipeline) | Recall | Precision | False positives |
 |---|---|---|---|
 | `window=48` (shipped default) | 15/17 | 16/17 = 0.941 | 1 |
 | `window=144` | 15/17 | 16/16 = **1.000** | **0** |

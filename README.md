@@ -11,4 +11,4 @@ NL query + anomaly detection over synthetic logs/metrics. Project 4 of a 4-proje
 ## Stack
 Python 3.12, FastAPI, DuckDB (embedded analytical DB), Claude (text-to-SQL), Streamlit UI.
 
-Status: Epics 1-3 done (foundation, synthetic data + ground truth, anomaly detectors). See `secondBrain` vault for the full architecture/feature plan and review history.
+Status: Epics 1-4 done (foundation, synthetic data + ground truth, anomaly detectors, detector eval). See [`eval/detector_results.md`](eval/detector_results.md) for real precision/recall numbers, and the `secondBrain` vault for the full architecture/feature plan and review history.

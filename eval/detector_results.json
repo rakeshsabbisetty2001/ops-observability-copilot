@@ -58,15 +58,32 @@
     }
   },
   "by_method_premerge": {
-    "rolling_zscore": {
-      "n": 6,
-      "tp": 5,
-      "precision": 0.8333333333333334
+    "rolling_zscore (window=48, shipped default)": {
+      "recall": 0.29411764705882354,
+      "precision": 0.8333333333333334,
+      "f1": 0.4347826086956522,
+      "n_gt": 17,
+      "n_det": 6,
+      "tp_recall": 5,
+      "tp_precision": 5
+    },
+    "rolling_zscore (window=144)": {
+      "recall": 0.5294117647058824,
+      "precision": 1.0,
+      "f1": 0.6923076923076924,
+      "n_gt": 17,
+      "n_det": 11,
+      "tp_recall": 9,
+      "tp_precision": 11
     },
     "seasonal_residual": {
-      "n": 26,
-      "tp": 26,
-      "precision": 1.0
+      "recall": 0.8823529411764706,
+      "precision": 1.0,
+      "f1": 0.9375,
+      "n_gt": 17,
+      "n_det": 26,
+      "tp_recall": 15,
+      "tp_precision": 26
     }
   },
   "by_method_postmerge": {
@@ -83,7 +100,7 @@
       "hits": 11
     }
   },
-  "window_144": {
+  "window_144_merged": {
     "recall": 0.8823529411764706,
     "precision": 1.0,
     "f1": 0.9375,
@@ -99,7 +116,7 @@
       "start_ts": "2026-08-08 17:30:00",
       "end_ts": "2026-08-08 17:35:00",
       "method": "rolling_zscore",
-      "score": "3.2809277945634365"
+      "score": 3.2809277945634365
     }
   ],
   "missed": [
