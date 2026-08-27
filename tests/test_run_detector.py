@@ -28,7 +28,7 @@ def test_run_detector_on_a_fresh_db_creates_all_tables(temp_db_paths):
 
     conn = duckdb.connect(ops_path, read_only=True)
     tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
-    assert tables == {"events", "detected_anomalies", "query_log"}
+    assert tables == {"events", "detected_anomalies"}
     conn.close()
 
 
@@ -45,7 +45,7 @@ def test_run_detector_writes_all_tables_and_preserves_events(temp_db_paths):
 
     conn = duckdb.connect(ops_path, read_only=True)
     tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
-    assert tables == {"events", "detected_anomalies", "query_log"}
+    assert tables == {"events", "detected_anomalies"}
     assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == len(events_df)
     assert conn.execute("SELECT COUNT(*) FROM detected_anomalies").fetchone()[0] == len(result)
     conn.close()

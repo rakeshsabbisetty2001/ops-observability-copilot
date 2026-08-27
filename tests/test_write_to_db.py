@@ -56,7 +56,7 @@ def test_ops_db_has_all_its_own_tables(temp_db_paths):
 
     conn = duckdb.connect(ops_path, read_only=True)
     tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
-    assert tables == {"events", "detected_anomalies", "query_log"}
+    assert tables == {"events", "detected_anomalies"}
     conn.close()
 
 

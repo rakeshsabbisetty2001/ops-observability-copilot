@@ -19,15 +19,25 @@ class Settings(BaseSettings):
     # Separate file so ground truth is physically unreachable from the API's
     # connection, not just excluded by a guardrail regex (Epic 1-2 review #2).
     ground_truth_duckdb_path: str = str(_REPO_ROOT / "data" / "ground_truth.duckdb")
+    # Also separate: DuckDB refuses to open a read_only connection to a file
+    # that has ANY other connection open with a different read_only value,
+    # regardless of matching config dicts (verified directly — this is not
+    # fixable by aligning configs). The API's ops.duckdb connections must
+    # stay read_only=True at all times; query_log needs to write on every
+    # request, so it can't live in the same file (Epic 5 review round 1, #3).
+    query_log_duckdb_path: str = str(_REPO_ROOT / "data" / "query_log.duckdb")
 
-    @field_validator("anthropic_api_key", "anthropic_model", "duckdb_path", "ground_truth_duckdb_path", mode="before")
+    @field_validator(
+        "anthropic_api_key", "anthropic_model", "duckdb_path", "ground_truth_duckdb_path", "query_log_duckdb_path",
+        mode="before",
+    )
     @classmethod
     def strip_whitespace(cls, v: str) -> str:
         # Project 1 hit a real bug from a stray leading space pasted into .env —
         # pydantic-settings' own .env parsing strips it, but not every loader does.
         return v.strip() if isinstance(v, str) else v
 
-    @field_validator("duckdb_path", "ground_truth_duckdb_path", mode="after")
+    @field_validator("duckdb_path", "ground_truth_duckdb_path", "query_log_duckdb_path", mode="after")
     @classmethod
     def resolve_relative_to_repo_root(cls, v: str) -> str:
         # A relative path (e.g. from .env) is otherwise cwd-dependent — run a

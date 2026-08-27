@@ -269,18 +269,18 @@ def write_to_db(events_df: pd.DataFrame, gt_df: pd.DataFrame) -> None:
     try:
         conn.execute("BEGIN TRANSACTION")
         try:
-            # detected_anomalies + query_log, IF NOT EXISTS — a targeted
-            # DROP+CREATE of just `events` below must not leave the other two
-            # tables uncreated (Epic 1-2 review round 2, #1: this call was
-            # dropped by the round-1 rewrite and silently deleted both tables
-            # from the shipped corpus).
+            # detected_anomalies, IF NOT EXISTS — a targeted DROP+CREATE of
+            # just `events` below must not leave it uncreated (Epic 1-2
+            # review round 2, #1: this call was dropped by the round-1
+            # rewrite and silently deleted it from the shipped corpus).
+            # query_log now lives in its own file (Epic 5 review round 1,
+            # #3) and isn't touched here at all.
             init_schema(conn)
             conn.execute("DROP TABLE IF EXISTS events")
             conn.execute(EVENTS_TABLE_SQL)
             # detected_anomalies is DERIVED from events (its sample_event_ids
             # point into it) — a regenerate must not leave stale rows pointing
-            # at ids that no longer exist. query_log is an audit trail and
-            # deliberately survives a regenerate (round 3 review, #3).
+            # at ids that no longer exist.
             conn.execute("DELETE FROM detected_anomalies")
             conn.execute(
                 "INSERT INTO events (id, ts, service, metric_name, value, level, message) "

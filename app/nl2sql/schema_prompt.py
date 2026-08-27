@@ -18,7 +18,7 @@ events
   message       VARCHAR     a short human-readable log line
 
 detected_anomalies
-  id                BIGINT      unique row id
+  id                INTEGER     unique row id
   service           VARCHAR
   metric_name       VARCHAR
   start_ts          TIMESTAMP   when the flagged window began

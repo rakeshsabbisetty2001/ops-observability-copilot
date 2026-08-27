@@ -2,20 +2,59 @@
 (read-only) -> summarize -> link overlapping detected_anomalies.
 
 Every step is logged to query_log (audit trail + future eval fixture
-material) via a SEPARATE write connection — the query-execution connection
-stays read_only=True throughout; logging never shares that connection.
+material) via a single persistent connection to query_log's OWN file,
+serialized with a lock — never an ad-hoc connection to ops.duckdb (DuckDB
+refuses to open a read_only connection to a file that has any other
+connection open with a different read_only value, so a per-call write
+connection to ops.duckdb would collide with the read-only query connection
+under real concurrency; reproduced live during Epic 5's review, round 1 #3).
 """
 import threading
 import time
 
 import pandas as pd
 
-from app.db import get_connection, init_schema
+from app.db import QUERY_LOG_TABLE_SQL, get_connection, get_query_log_connection
 from app.nl2sql.generate import generate_sql
 from app.nl2sql.guardrail import GuardrailRejection, validate_and_prepare
 from app.nl2sql.summarize import summarize_result
 
 _QUERY_TIMEOUT_SECONDS = 5
+# Independent of whatever row LIMIT the guardrail enforced — bounds what
+# actually reaches the summarizer prompt, since a row count under the limit
+# says nothing about payload size (Epic 5 review round 1, #6: a single
+# `repeat()` call put ~800MB across 400 rows, well under a 500-row cap).
+_MAX_ROWS_TO_SUMMARIZE = 50
+_MAX_CELL_CHARS = 500
+
+# A generic, fixed message for every failure surfaced to a client — never
+# the specific reason, the rejected SQL, or an exception type/message, which
+# would turn a response into an oracle for mapping the guardrail's exact
+# boundaries or leaking internals (Epic 5 review round 1, #4: the exception
+# itself already withheld this, but ask() was handing both back one frame
+# later). The real reason always still goes to query_log.
+_GENERIC_ERROR_MESSAGE = "the question could not be answered"
+
+_query_log_lock = threading.Lock()
+_query_log_conn = None
+
+
+def _get_query_log_conn():
+    global _query_log_conn
+    if _query_log_conn is None:
+        conn = get_query_log_connection(read_only=False)
+        try:
+            conn.execute(QUERY_LOG_TABLE_SQL)
+        except Exception:
+            # Don't leave a connection assigned to the global if schema
+            # setup didn't fully complete — a partial failure here once
+            # silently poisoned every later call in the process (the
+            # connection object existed, so the `is None` check never
+            # retried, but the table it needed was never actually created).
+            conn.close()
+            raise
+        _query_log_conn = conn
+    return _query_log_conn
 
 
 def _execute_with_timeout(conn, sql: str, timeout_seconds: float) -> pd.DataFrame:
@@ -44,52 +83,63 @@ def _execute_with_timeout(conn, sql: str, timeout_seconds: float) -> pd.DataFram
 
 
 def ask(question: str) -> dict:
+    """One log record per call, written in `finally`, whatever happened —
+    this used to be logged separately on each failure branch, which meant a
+    failure AFTER execution (summarize_result is a live network call:
+    timeouts/429s/529s are routine; so is _find_overlapping_anomalies
+    hitting a DB error) skipped the audit record entirely for a request that
+    had actually run real SQL (Epic 5 review round 1, #9)."""
     start = time.monotonic()
-    generated_sql = None
-    validation_result = "ok"
-    row_count = None
+    generated_sql: str | None = None
+    validation_result = "did not complete"
+    row_count: int | None = None
 
     try:
         generated_sql = generate_sql(question)
         safe_sql = validate_and_prepare(generated_sql)
+        validation_result = "ok"
+
+        conn = get_connection(read_only=True)
+        try:
+            result_df = _execute_with_timeout(conn, safe_sql, _QUERY_TIMEOUT_SECONDS)
+        finally:
+            conn.close()
+
+        row_count = len(result_df)
+        rows = _cap_rows_for_summary(result_df)
+        answer = summarize_result(question, rows)
+        anomaly_ids = _find_overlapping_anomalies(result_df)
+
+        return {
+            "question": question,
+            "sql": safe_sql,
+            "answer": answer,
+            "row_count": row_count,
+            "anomaly_ids": anomaly_ids,
+            "error": None,
+        }
     except GuardrailRejection as e:
         validation_result = str(e)
-        _log(question, generated_sql, validation_result, row_count=None, latency_ms=_elapsed_ms(start))
-        return {"question": question, "sql": generated_sql, "error": validation_result, "answer": None, "row_count": None, "anomaly_ids": []}
-
-    conn = get_connection(read_only=True)
-    try:
-        result_df = _execute_with_timeout(conn, safe_sql, _QUERY_TIMEOUT_SECONDS)
+        return {"question": question, "sql": None, "answer": None, "row_count": None, "anomaly_ids": [], "error": _GENERIC_ERROR_MESSAGE}
     except Exception as e:
-        # Close BEFORE logging, not in a `finally` — `_log` opens its own
-        # read_only=False connection to the same file, and DuckDB refuses to
-        # open a second connection with a different config while this one is
-        # still open (real bug, caught by a test: raised ConnectionException
-        # instead of the intended clean error response).
-        conn.close()
-        validation_result = f"execution error: {type(e).__name__}"
-        _log(question, generated_sql, validation_result, row_count=None, latency_ms=_elapsed_ms(start))
-        return {"question": question, "sql": safe_sql, "error": "the generated query could not be executed", "answer": None, "row_count": None, "anomaly_ids": []}
-    conn.close()
-
-    row_count = len(result_df)
-    rows = result_df.to_dict("records")
-    answer = summarize_result(question, rows)
-    anomaly_ids = _find_overlapping_anomalies(result_df)
-
-    _log(question, generated_sql, validation_result, row_count=row_count, latency_ms=_elapsed_ms(start))
-
-    return {
-        "question": question,
-        "sql": safe_sql,
-        "answer": answer,
-        "row_count": row_count,
-        "anomaly_ids": anomaly_ids,
-    }
+        validation_result = f"error: {type(e).__name__}"
+        return {"question": question, "sql": None, "answer": None, "row_count": None, "anomaly_ids": [], "error": _GENERIC_ERROR_MESSAGE}
+    finally:
+        _log(question, generated_sql, validation_result, row_count, _elapsed_ms(start))
 
 
 def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
+
+
+def _cap_rows_for_summary(result_df: pd.DataFrame) -> list[dict]:
+    capped = result_df.head(_MAX_ROWS_TO_SUMMARIZE)
+    rows = capped.to_dict("records")
+    for row in rows:
+        for key, value in row.items():
+            if isinstance(value, str) and len(value) > _MAX_CELL_CHARS:
+                row[key] = value[:_MAX_CELL_CHARS] + "...(truncated)"
+    return rows
 
 
 def _find_overlapping_anomalies(result_df: pd.DataFrame) -> list[int]:
@@ -121,14 +171,10 @@ def _find_overlapping_anomalies(result_df: pd.DataFrame) -> list[int]:
 
 
 def _log(question: str, generated_sql: str | None, validation_result: str, row_count: int | None, latency_ms: int) -> None:
-    conn = get_connection(read_only=False)
-    try:
-        init_schema(conn)
-        next_id = conn.execute("SELECT COALESCE(MAX(id), -1) + 1 FROM query_log").fetchone()[0]
+    with _query_log_lock:
+        conn = _get_query_log_conn()
         conn.execute(
-            "INSERT INTO query_log (id, ts, question, generated_sql, validation_result, row_count, latency_ms) "
-            "VALUES (?, now(), ?, ?, ?, ?, ?)",
-            [next_id, question, generated_sql, validation_result, row_count, latency_ms],
+            "INSERT INTO query_log (ts, question, generated_sql, validation_result, row_count, latency_ms) "
+            "VALUES (now(), ?, ?, ?, ?, ?)",
+            [question, generated_sql, validation_result, row_count, latency_ms],
         )
-    finally:
-        conn.close()

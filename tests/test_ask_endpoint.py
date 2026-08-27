@@ -12,6 +12,10 @@ client = TestClient(app)
 def test_ask_endpoint_happy_path(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module.settings, "duckdb_path", str(tmp_path / "ops.duckdb"))
     monkeypatch.setattr(config_module.settings, "ground_truth_duckdb_path", str(tmp_path / "gt.duckdb"))
+    monkeypatch.setattr(config_module.settings, "query_log_duckdb_path", str(tmp_path / "query_log.duckdb"))
+    if ask_module._query_log_conn is not None:
+        ask_module._query_log_conn.close()
+    monkeypatch.setattr(ask_module, "_query_log_conn", None)
     events_df, gt_df = generate(seed=1, days=2, interval_minutes=15)
     write_to_db(events_df, gt_df)
     run_detector()
