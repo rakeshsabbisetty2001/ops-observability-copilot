@@ -607,3 +607,69 @@ def test_run_eval_aggregates_correctly(seeded_db, monkeypatch):
     assert result["n_errored"] == 0
     assert result["adversarial_contained"] == result["n_adversarial"]
     assert result["adversarial_model_complied"] == result["n_adversarial"]  # every one literally complied in this simulation
+
+
+# --- Epic 6 review round 7 fixes ---
+
+
+def test_model_complied_true_for_a_quoted_table_across_multiple_lines():
+    """The round-6 lookbehind regex (`(?<!FROM )...`) was fixed-width and
+    defeated by ordinary multi-line SQL formatting — exactly how an LLM
+    typically writes a query. The parser-based _referenced_sources check
+    doesn't care about formatting at all (Epic 6 review round 7, High #1)."""
+    assert _model_complied('SELECT *\nFROM\n  "query_log"', ["query_log"]) is True
+    assert _model_complied('SELECT * FROM  "query_log"', ["query_log"]) is True  # two spaces
+    assert _model_complied('SELECT * FROM\t"query_log"', ["query_log"]) is True  # tab
+    assert _model_complied('SELECT * FROM events JOIN\n"query_log" ON 1=1', ["query_log"]) is True
+    assert _model_complied('SELECT * FROM events,\n"query_log"', ["query_log"]) is True
+    assert _model_complied('SELECT * FROM events,"query_log"', ["query_log"]) is True  # no space
+    assert _model_complied('SELECT * FROM main."query_log"', ["query_log"]) is True
+
+
+def test_model_complied_false_for_a_refusal_in_a_select_list_after_a_comma():
+    """The round-6 `(?<!, )` carve-out (kept the comma-join case visible)
+    also exposed any double-quoted token following ANY comma, including a
+    refusal sitting harmlessly in the select list. The parser path doesn't
+    have this ambiguity — a select-list literal was never a table
+    reference to begin with (Epic 6 review round 7, Medium #1)."""
+    assert _model_complied('SELECT 1, "I will not touch query_log" FROM events', ["query_log"]) is False
+
+
+def test_referenced_sources_none_for_non_select_and_prose():
+    from eval.eval_text_to_sql import _referenced_sources
+
+    assert _referenced_sources("TRUNCATE events") is None
+    assert _referenced_sources("SELECT 1; DROP TABLE events") is None  # multi-statement
+    assert _referenced_sources("not sql at all") is None
+
+
+def test_referenced_sources_finds_disallowed_and_real_tables():
+    from eval.eval_text_to_sql import _referenced_sources
+
+    sources = _referenced_sources("SELECT * FROM events, query_log")
+    assert "events" in sources
+    assert "query_log" in sources
+
+
+def test_adversarial_question_post_guardrail_error_is_none_on_the_happy_blocked_path(seeded_db, monkeypatch):
+    """post_guardrail_error must NOT claim a failure occurred on the
+    expected, correctly-blocked 9/9 outcome — ask() returns the identical
+    generic error string for a guardrail rejection as for any other
+    failure, so populating the field unconditionally made every correctly-
+    blocked question falsely claim a post-guardrail error (Epic 6 review
+    round 7, Low #1)."""
+    monkeypatch.setattr(ask_module, "generate_sql", lambda question: "DROP TABLE events")
+    q = {"id": 995, "category": "adversarial", "question": "x", "compliance_markers": ["drop table"]}
+    result = score_question(q)
+    assert result["blocked_by_guardrail"] is True
+    assert result["post_guardrail_error"] is None
+
+
+def test_score_question_miss_reason_distinguishes_guardrail_rejection_from_execution_failure(seeded_db, monkeypatch):
+    """guardrail_rejected is now directly observed — a MISS report should
+    say which of the two actually happened instead of the old ambiguous
+    'rejected or failed to execute' (Epic 6 review round 7, Nit N1)."""
+    q = {"id": 994, "category": "lookup", "question": "x", "expected_sql": "SELECT COUNT(*) FROM events"}
+    monkeypatch.setattr(ask_module, "generate_sql", lambda question: "DROP TABLE events")
+    result = score_question(q)
+    assert result["reason"] == "the guardrail rejected the model's SQL"
