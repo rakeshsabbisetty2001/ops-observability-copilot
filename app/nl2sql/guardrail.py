@@ -7,20 +7,32 @@ get_connection) — a physical backstop that survives a bug in this file,
 verified during Epic 1-2's review: enable_external_access=False blocks
 COPY TO / read_csv_auto / ATTACH / etc even on a read_only connection, and
 read_only itself blocks INSERT/UPDATE/DELETE/DDL at the DuckDB level. Never
-trust either layer alone — that lesson is why both exist.
+trust either layer alone — that lesson is why both exist. It's also why the
+table allowlist below has been wrong twice already (round 1: a regex only
+caught the first identifier after FROM/JOIN, missing comma joins; round 2:
+CTE names were tracked as one flat, unscoped set, so declaring a throwaway
+"WITH query_log AS (...)" whitelisted every real reference to that name
+anywhere else in the query) — each time, `read_only` + external-access-off
+meant the actual damage was "reads a table it shouldn't", not "escapes the
+database entirely".
 
-Round 1 of this epic's review shipped a regex-based version of this file and
-found it had a working bypass: `_TABLE_REF` only captured the first
-identifier after FROM/JOIN, so a comma join (`FROM events, query_log`) or a
-comment-obfuscated JOIN (`JOIN/**/query_log`) leaked the audit log and
-DuckDB's own catalog functions. Regexes cannot safely enumerate "every table
-this query touches" — only a real parser can. This version uses DuckDB's own
-`json_serialize_sql()` to get the actual parsed AST and walks it for real
-table references, which also means: non-SELECT statements are rejected by
-the parser itself (it refuses to serialize anything but a SELECT), multi-
-statement strings are visible as multiple parsed statements, comments and
-string-literal contents can no longer be mistaken for SQL syntax, and CTEs
-(WITH ...) are supported since their table references are enumerable too.
+Uses DuckDB's own `json_serialize_sql()` to get the real parsed AST rather
+than pattern-matching text — a regex cannot safely enumerate "every table
+this query touches". Non-SELECT statements are rejected by the parser
+itself (it refuses to serialize anything but a SELECT); multi-statement
+strings show up as multiple parsed statements.
+
+Known gap, not closed: this only examines data SOURCES (tables/CTEs/table
+functions/SHOW-as-source). Scalar functions in the SELECT list or WHERE
+clause aren't inspected at all, so `SELECT current_setting('memory_limit')`
+passes and discloses this guardrail's own configuration — a minor
+information leak (this project's own connection settings, not real data or
+the filesystem), not currently actionable further since `getenv()` doesn't
+exist in this DuckDB version and file-reading scalar functions are already
+blocked by the binder for a reason unrelated to this file
+(enable_external_access, see app.db). Worth an allowlist on scalar function
+names if DuckDB ever adds a scalar with real read access (Epic 5 review
+round 2, #8).
 """
 import json
 
@@ -45,9 +57,8 @@ def _serialize_to_ast(sql: str) -> dict:
     # DuckDB connections are not safe for concurrent execute() calls from
     # multiple threads — a shared parser connection caused a real access
     # violation (native crash, not a Python exception) under 8 concurrent
-    # /ask requests (Epic 5 review round 1 follow-up, found while verifying
-    # the fix for finding #3's concurrency issues). In-memory connect/close
-    # has no file I/O and is cheap enough to pay per call.
+    # /ask requests (Epic 5 review round 1 follow-up). In-memory
+    # connect/close has no file I/O and is cheap enough to pay per call.
     escaped = sql.replace("'", "''")
     conn = duckdb.connect(":memory:")
     try:
@@ -59,37 +70,65 @@ def _serialize_to_ast(sql: str) -> dict:
     return json.loads(raw)
 
 
-def _collect_tables_and_ctes(node, tables: set[str], cte_names: set[str], table_functions: set[str]) -> None:
-    """Recursively walk the AST dict/list structure.
-    - type == BASE_TABLE names a real table reference.
-    - type == TABLE_FUNCTION is a call like duckdb_settings() or
-      read_csv_auto('x') used as a data source — collected separately and
-      ALWAYS rejected (no allowlist for these at all): the app has no
-      legitimate use for any function-based table source, and this project
-      already found duckdb_settings()/duckdb_databases()/duckdb_tables()
-      dumping the server's config and on-disk paths when only BASE_TABLE
-      nodes were checked (Epic 5 review round 1, #1).
-    - cte_map collects locally-defined CTE names, which are not real tables
-      and must not be checked against the allowlist (a query's own
-      "WITH x AS (...)" defines a name that only exists inside that query).
+def _walk(node, visible_ctes: frozenset, disallowed_tables: set, disallowed_sources: set, all_real_tables: set) -> None:
+    """Recursively walk the AST, checking every table-like reference AS IT'S
+    FOUND rather than collecting names into flat sets and reconciling
+    afterward — the flat-set approach is what caused round 2's CTE-shadowing
+    bug (a CTE name defined in one subquery incorrectly whitelisted a real
+    table reference in an unrelated sibling subquery, since "is this name a
+    CTE" was answered against one global set instead of the CTE names
+    actually in scope at that point in the tree).
+
+    visible_ctes is the set of CTE names in scope at THIS node — extended
+    only for this node's own subtree when a cte_map is present, never
+    globally. A BASE_TABLE only gets the CTE exemption if it is unqualified
+    (no schema_name/catalog_name) AND its name is in visible_ctes — a
+    qualified reference (main.query_log, memory.main.events) can never
+    resolve to a CTE regardless of name, so it's always checked directly.
+
+    SHOW_REF (the node type for `SHOW t` / `DESCRIBE t` / `SUMMARIZE t` used
+    as a data source) is rejected unconditionally, same as TABLE_FUNCTION —
+    SUMMARIZE in particular returns real per-column min/max/quartiles, not
+    just metadata, so it's a data leak, not a schema-disclosure nit.
     """
     if isinstance(node, dict):
-        if node.get("type") == "BASE_TABLE":
-            tables.add(node.get("table_name", "").lower())
-        elif node.get("type") == "TABLE_FUNCTION":
+        node_type = node.get("type")
+
+        if node_type == "BASE_TABLE":
+            name = node.get("table_name", "").lower()
+            qualified = bool(node.get("schema_name")) or bool(node.get("catalog_name"))
+            is_cte_reference = not qualified and name in visible_ctes
+            if not is_cte_reference:
+                all_real_tables.add(name)
+                if name not in QUERYABLE_TABLES:
+                    disallowed_tables.add(name)
+        elif node_type == "TABLE_FUNCTION":
             fn = node.get("function", {})
-            table_functions.add(fn.get("function_name", "<unknown>"))
+            disallowed_sources.add(fn.get("function_name", "<unknown function>"))
+        elif node_type == "SHOW_REF":
+            disallowed_sources.add(f"SHOW/DESCRIBE/SUMMARIZE: {node.get('table_name', '?')}")
+
+        local_ctes = visible_ctes
         cte_map = node.get("cte_map")
-        if isinstance(cte_map, dict):
-            for entry in cte_map.get("map", []):
-                key = entry.get("key")
-                if key:
-                    cte_names.add(key.lower())
-        for value in node.values():
-            _collect_tables_and_ctes(value, tables, cte_names, table_functions)
+        if isinstance(cte_map, dict) and cte_map.get("map"):
+            new_names = {e["key"].lower() for e in cte_map["map"] if e.get("key")}
+            local_ctes = visible_ctes | new_names
+            # Walk each CTE's own body with the extended scope too — DuckDB
+            # allows a later CTE in the same WITH clause to reference an
+            # earlier one (and, harmlessly for this check, a self-reference
+            # for a recursive CTE).
+            for entry in cte_map["map"]:
+                body = entry.get("value", {}).get("query")
+                if body is not None:
+                    _walk(body, local_ctes, disallowed_tables, disallowed_sources, all_real_tables)
+
+        for key, value in node.items():
+            if key == "cte_map":
+                continue  # already walked above with the correctly extended scope
+            _walk(value, local_ctes, disallowed_tables, disallowed_sources, all_real_tables)
     elif isinstance(node, list):
         for item in node:
-            _collect_tables_and_ctes(item, tables, cte_names, table_functions)
+            _walk(item, visible_ctes, disallowed_tables, disallowed_sources, all_real_tables)
 
 
 def validate_and_prepare(sql: str) -> str:
@@ -99,7 +138,9 @@ def validate_and_prepare(sql: str) -> str:
     defeated by a trailing `--` comment, a `LIMIT` inside a string literal
     satisfying the presence check, or an inner subquery's own LIMIT. A
     structural outer wrapper is immune to all three since it's a completely
-    separate clause the model's text never touches."""
+    separate clause the model's text never touches. The newline before the
+    closing paren is load-bearing, not style — see the comment at the return
+    statement."""
     if not sql or not sql.strip():
         raise GuardrailRejection("empty query")
 
@@ -111,27 +152,25 @@ def validate_and_prepare(sql: str) -> str:
     if len(statements) != 1:
         raise GuardrailRejection(f"expected exactly one statement, got {len(statements)}")
 
-    tables: set[str] = set()
-    cte_names: set[str] = set()
-    table_functions: set[str] = set()
-    _collect_tables_and_ctes(statements[0], tables, cte_names, table_functions)
+    disallowed_tables: set[str] = set()
+    disallowed_sources: set[str] = set()
+    all_real_tables: set[str] = set()
+    _walk(statements[0], frozenset(), disallowed_tables, disallowed_sources, all_real_tables)
 
-    if table_functions:
-        raise GuardrailRejection(f"query uses a function as a data source, which is never allowed: {sorted(table_functions)}")
-
-    real_tables = tables - cte_names
-    disallowed = real_tables - QUERYABLE_TABLES
-    if disallowed:
-        raise GuardrailRejection(f"query references a table that is not allowed: {sorted(disallowed)}")
-    if not real_tables:
+    if disallowed_sources:
+        raise GuardrailRejection(f"query uses a disallowed data source: {sorted(disallowed_sources)}")
+    if disallowed_tables:
+        raise GuardrailRejection(f"query references a table that is not allowed: {sorted(disallowed_tables)}")
+    if not all_real_tables:
+        # e.g. a bare "SELECT 1" — harmless but useless here, reject rather
+        # than silently no-op.
         raise GuardrailRejection("query does not reference an allowed table")
 
     inner = sql.strip().rstrip(";")
-    # The newline before the closing paren is load-bearing, not style: if the
-    # model's query ends with a `--` line comment, appending `) AS ... LIMIT`
-    # on the SAME line would itself land inside that comment — the exact
-    # class of bug this wrapper exists to close, one level up. A newline
-    # ends the comment first (verified: without it, a trailing `--` comment
-    # produces a syntax error here instead of silently losing the LIMIT,
-    # which is a symptom of the same root cause, not a different bug).
+    # The newline before the closing paren is load-bearing: if the model's
+    # query ends with a `--` line comment, appending `) AS ... LIMIT` on the
+    # SAME line would itself land inside that comment — the exact class of
+    # bug this wrapper exists to close, one level up. A newline ends the
+    # comment first (verified: without it, a trailing `--` comment produces
+    # a syntax error here instead of silently losing the LIMIT).
     return f"SELECT * FROM (\n{inner}\n) AS _guardrail_wrapped LIMIT {DEFAULT_ROW_LIMIT}"

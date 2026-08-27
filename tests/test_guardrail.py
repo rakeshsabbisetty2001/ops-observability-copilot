@@ -42,6 +42,53 @@ def test_join_across_two_allowed_tables_passes():
     assert "LIMIT" in result
 
 
+# --- Epic 5 review round 2: CTE-name shadowing and SHOW_REF bypasses ------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # (a) a qualified reference can never resolve to a CTE, regardless of name
+        "WITH query_log AS (SELECT 1 a) SELECT ql.* FROM events, main.query_log ql",
+        # (b) a CTE declared in one subquery must not whitelist a real
+        # reference in an unrelated sibling subquery
+        "SELECT * FROM (WITH sqlite_master AS (SELECT 1 a) SELECT * FROM sqlite_master) t, "
+        "(SELECT * FROM sqlite_master) u, events",
+        "SELECT (SELECT count(*) FROM (WITH sqlite_master AS (SELECT 1 a) SELECT a FROM sqlite_master)) AS c, "
+        "x.name FROM events, sqlite_master x",
+    ],
+)
+def test_cte_name_cannot_shadow_a_real_disallowed_table_reference(sql):
+    """A flat, unscoped set of CTE names let a throwaway 'WITH query_log AS
+    (...)' whitelist every REAL reference to that name anywhere else in the
+    query, reading full rows of a disallowed table (Epic 5 review round 2,
+    #1 — verified end to end against the real corpus with a seeded
+    'CONFIDENTIAL' query_log row, which came back in full)."""
+    with pytest.raises(GuardrailRejection):
+        validate_and_prepare(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM events, (SUMMARIZE sqlite_master)",
+        "SELECT * FROM events, (DESCRIBE sqlite_master)",
+        "SELECT * FROM events, (SHOW sqlite_master)",
+        "SELECT * FROM events, (SUMMARIZE main.sqlite_master)",
+        "SELECT * FROM events, (SHOW ALL TABLES)",
+        "SELECT * FROM events, (SHOW DATABASES)",
+        "WITH c AS (SELECT * FROM (SHOW ALL TABLES)) SELECT * FROM events, c",
+    ],
+)
+def test_show_describe_summarize_as_a_data_source_rejected(sql):
+    """SHOW/DESCRIBE/SUMMARIZE parse to a SHOW_REF node the walker didn't
+    recognize at all, so cross-joined with an allowed table they passed
+    straight through — SUMMARIZE isn't metadata-only, it returns real
+    per-column min/max/quartiles/count (Epic 5 review round 2, #2)."""
+    with pytest.raises(GuardrailRejection):
+        validate_and_prepare(sql)
+
+
 def test_cte_over_allowed_tables_is_now_supported():
     """A regex-based guardrail could not safely tell a CTE name from a real
     table reference, so CTEs were rejected outright — the parser-based

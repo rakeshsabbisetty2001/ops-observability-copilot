@@ -16,7 +16,15 @@ Three files, not one:
                          read_only=True at all times (that's the whole
                          point), and query_log needs to write on every
                          request, so the two cannot share a file (Epic 5
-                         review round 1, #3).
+                         review round 1, #3). Migrated OUT of ops.duckdb,
+                         not just stopped being created there — the
+                         generator now actively drops a leftover query_log
+                         table from any ops.duckdb predating this split, so
+                         "the API can't reach it" is physically true of the
+                         actual shipped file, not just of new ones (Epic 5
+                         review round 2, #4: the committed file still had
+                         the table, readable through the very allowlist bug
+                         that round found).
 
 Two explicit read_only modes on get_connection, never a default that could
 accidentally allow writes:
@@ -108,6 +116,17 @@ def get_connection(read_only: bool) -> duckdb.DuckDBPyConnection:
     # native crash) with the row cap fully satisfied (Epic 5 review round 1,
     # #6). Only set on the API's read-only path; offline scripts write the
     # full corpus and shouldn't be constrained by a request-sized budget.
+    # ponytail: this budget is per DATABASE INSTANCE, shared by every
+    # concurrent read-only connection to this file in the process — DuckDB
+    # has no per-query memory limit — so one hostile question can degrade
+    # every concurrent user's request (measured: a heavy query running
+    # alongside others under load turned their otherwise-fine queries into
+    # OutOfMemoryException/TimeoutError too). Fails safe (catchable errors,
+    # no crash) rather than crashing, which is the property that actually
+    # matters here; true per-request isolation would need a connection pool
+    # with its own budget or a process-per-request model, worth it only if
+    # this ever serves real concurrent traffic at scale (Epic 5 review
+    # round 2, #5).
     config = {"enable_external_access": "false", "memory_limit": "512MB"} if read_only else {}
     return duckdb.connect(settings.duckdb_path, read_only=read_only, config=config)
 

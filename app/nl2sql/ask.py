@@ -57,11 +57,27 @@ def _get_query_log_conn():
     return _query_log_conn
 
 
+class _AbandonedWorkerError(TimeoutError):
+    """A query overran its timeout AND didn't die after being interrupted.
+    The caller must NOT close the connection this was raised for — the
+    worker thread may still be inside conn.execute() on it, and closing a
+    connection out from under a still-running query deadlocks every later
+    duckdb.connect() to that file for the rest of the process (Epic 5
+    review round 2, #3 — reproduced directly: with the join window widened,
+    6 of 10 runs hung indefinitely, confirmed via thread stack dumps to be
+    new requests blocked in duckdb.connect() behind an orphaned worker still
+    executing on the connection ask() had already closed). One leaked
+    connection object is a far smaller cost than a process-wide hang."""
+
+
 def _execute_with_timeout(conn, sql: str, timeout_seconds: float) -> pd.DataFrame:
     """DuckDB has no built-in statement timeout — run the query on a worker
     thread and conn.interrupt() it from here if it overruns, so one
     pathological generated query (e.g. an accidental cross join) can't hang
-    the request indefinitely."""
+    the request indefinitely. Keeps interrupting until the worker actually
+    dies rather than giving up after one bounded join — a single join(1)
+    that expires doesn't mean the worker won't die a moment later, and
+    abandoning it early was the direct cause of the deadlock above."""
     outcome: dict = {}
 
     def _run():
@@ -74,9 +90,12 @@ def _execute_with_timeout(conn, sql: str, timeout_seconds: float) -> pd.DataFram
     worker.start()
     worker.join(timeout_seconds)
     if worker.is_alive():
-        conn.interrupt()
-        worker.join(1)
-        raise TimeoutError(f"query exceeded {timeout_seconds}s timeout")
+        for _ in range(5):  # a few interrupt attempts, not an infinite loop
+            conn.interrupt()
+            worker.join(1)
+            if not worker.is_alive():
+                raise TimeoutError(f"query exceeded {timeout_seconds}s timeout")
+        raise _AbandonedWorkerError(f"query exceeded {timeout_seconds}s timeout and could not be interrupted")
     if "error" in outcome:
         raise outcome["error"]
     return outcome["df"]
@@ -102,7 +121,9 @@ def ask(question: str) -> dict:
         conn = get_connection(read_only=True)
         try:
             result_df = _execute_with_timeout(conn, safe_sql, _QUERY_TIMEOUT_SECONDS)
-        finally:
+        except _AbandonedWorkerError:
+            raise  # do NOT close conn here — see _AbandonedWorkerError's docstring
+        else:
             conn.close()
 
         row_count = len(result_df)
@@ -122,10 +143,22 @@ def ask(question: str) -> dict:
         validation_result = str(e)
         return {"question": question, "sql": None, "answer": None, "row_count": None, "anomaly_ids": [], "error": _GENERIC_ERROR_MESSAGE}
     except Exception as e:
-        validation_result = f"error: {type(e).__name__}"
+        # The real reason (str(e)), not just the exception type name — round
+        # 1's fix was described as logging "the real failure reason" but
+        # only did that for guardrail rejections; every other failure logged
+        # a bare type name with the message discarded (Epic 5 review round
+        # 2, #6). query_log is the audit trail; the type alone isn't enough
+        # to debug a live incident from.
+        validation_result = f"error: {type(e).__name__}: {e}"[:2000]
         return {"question": question, "sql": None, "answer": None, "row_count": None, "anomaly_ids": [], "error": _GENERIC_ERROR_MESSAGE}
     finally:
-        _log(question, generated_sql, validation_result, row_count, _elapsed_ms(start))
+        # Never let a logging failure replace the response above — the audit
+        # write is the least important thing in this function to fail the
+        # request on (Epic 5 review round 2, #7).
+        try:
+            _log(question, generated_sql, validation_result, row_count, _elapsed_ms(start))
+        except Exception:
+            pass
 
 
 def _elapsed_ms(start: float) -> int:
