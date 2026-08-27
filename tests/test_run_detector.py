@@ -15,6 +15,23 @@ def temp_db_paths(tmp_path, monkeypatch):
     return ops_path, gt_path
 
 
+def test_run_detector_on_a_fresh_db_creates_all_tables(temp_db_paths):
+    """Epic 3 review round 2, #3 — the round-1 write-path test always ran
+    write_to_db() first, which already creates events/query_log itself, so
+    it passed unchanged even with init_schema() deleted from run_detector.
+    This test calls run_detector() with NO prior generator run, so init_schema
+    is the only thing that could create events/query_log — it genuinely fails
+    without that call (verified: reverting it raises CatalogException here)."""
+    ops_path, _ = temp_db_paths
+    result = run_detector()
+    assert result.empty
+
+    conn = duckdb.connect(ops_path, read_only=True)
+    tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+    assert tables == {"events", "detected_anomalies", "query_log"}
+    conn.close()
+
+
 def test_run_detector_writes_all_tables_and_preserves_events(temp_db_paths):
     """Epic 3 review round 1, #4 — this is the exact gap that let Epic 1-2's
     init_schema regression through undetected: a script's write path with no

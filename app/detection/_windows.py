@@ -13,12 +13,14 @@ def flags_to_windows(
     service: str,
     metric: str,
     min_run: int = 2,
+    extreme_z: float = 8.0,
 ) -> list[dict]:
     """g is sorted by ts with a fresh 0..n-1 index; flagged/z share that index.
     Merges consecutive flagged rows (by position, not by time gap — the
     generator's timestamps are evenly spaced, so consecutive positions are
     consecutive points) into one detection row per contiguous run of at least
-    `min_run` points.
+    `min_run` points — OR a single point whose |z| clears `extreme_z` on its
+    own, so a single-sample outage/spike isn't unconditionally invisible.
 
     min_run defaults to 2, not 1: at a plain 3.0 threshold, a single flagged
     point is indistinguishable from noise (measured false-positive rate on
@@ -28,6 +30,13 @@ def flags_to_windows(
     buys roughly 10x precision for a small recall cost (Epic 3 review round
     1, #1 — measured end to end on the real corpus: 595->34 detections,
     precision 0.074->0.794, recall 15/17->13/17).
+
+    The extreme_z escape exists because min_run=2 otherwise makes an
+    arbitrarily large single-point spike undetectable by construction — not
+    a small recall cost, an unconditional blind spot (Epic 3 review round 2,
+    #4, measured: a 40-sigma single-point spike produced zero detections
+    from either detector). Measured cost of the escape on 80,000 points of
+    clean noise at threshold=3.0: |z|>=8 fires ~1 point in 80,000 (~0.0013%).
     """
     idx = g.index[flagged].tolist()
     if not idx:
@@ -39,7 +48,7 @@ def flags_to_windows(
         if i is not None and i == prev + 1:
             prev = i
             continue
-        if prev - start + 1 >= min_run:
+        if prev - start + 1 >= min_run or float(z.loc[start:prev].abs().max()) >= extreme_z:
             seg = g.loc[start:prev]
             windows.append(
                 {

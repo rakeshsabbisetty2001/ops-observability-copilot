@@ -17,20 +17,26 @@ import pandas as pd
 from app.detection._windows import flags_to_windows
 
 
-def detect(events_df: pd.DataFrame, threshold: float = 3.0) -> pd.DataFrame:
+def detect(events_df: pd.DataFrame, threshold: float = 3.0, min_run: int = 2) -> pd.DataFrame:
     rows: list[dict] = []
     for (service, metric), group in events_df.groupby(["service", "metric_name"]):
         g = group.sort_values("ts").reset_index(drop=True)
         hourly_median = g.groupby(g["ts"].dt.hour)["value"].transform("median")
         residual = g["value"] - hourly_median
         # MAD scaled to be std-comparable under normality (1.4826x), same
-        # robustness reasoning as the median baseline above. Falls back to
-        # std if MAD is degenerate (>50% of residuals share the exact same
-        # value — e.g. a near-constant metric) rather than silently flagging
-        # nothing at all.
+        # robustness reasoning as the median baseline above. The std fallback
+        # below only triggers when MAD is exactly degenerate (a real corner
+        # case: a near-constant series where the majority residual value
+        # repeats) — that fallback is knowingly NOT robust (it's the same
+        # estimator this whole module exists to avoid), so it should only
+        # ever engage on a metric that's essentially flat to begin with,
+        # where a plain std is a reasonable last resort rather than a
+        # meaningful robustness story (Epic 3 review round 2, #8).
         mad = 1.4826 * (residual - residual.median()).abs().median()
         scale = mad if mad > 0 else residual.std()
         z = residual / scale if scale > 0 else residual * 0.0
-        rows.extend(flags_to_windows(g, z.abs() > threshold, z, "seasonal_residual", service, metric))
+        rows.extend(
+            flags_to_windows(g, z.abs() > threshold, z, "seasonal_residual", service, metric, min_run=min_run)
+        )
 
     return pd.DataFrame(rows, columns=["service", "metric_name", "start_ts", "end_ts", "method", "score", "sample_event_ids"])

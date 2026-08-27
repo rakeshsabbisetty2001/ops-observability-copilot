@@ -17,6 +17,12 @@ from app.detection import rolling_zscore, seasonal_residual
 # detection rows separated by small gaps. Without this, merge_detections
 # only merges strict overlaps and one real anomaly ships as up to 9 separate
 # rows (Epic 3 review round 1, #2).
+#
+# This is wall-clock, tuned against this corpus's 5-minute sampling (6
+# intervals) — it does NOT scale with a different --interval-minutes, so a
+# 1-minute corpus would get 30 intervals of slack and a 15-minute one only 2
+# (Epic 3 review round 2, #5). Fine for this project's one committed corpus;
+# revisit if the sampling interval ever becomes a real variable.
 _MERGE_GAP_TOLERANCE = pd.Timedelta(minutes=30)
 
 
@@ -33,6 +39,14 @@ def merge_detections(*dfs: pd.DataFrame) -> pd.DataFrame:
     - `method` is a "+"-joined string (e.g. "rolling_zscore+seasonal_residual")
       for rows both methods caught. `WHERE method = 'rolling_zscore'` misses
       those rows; use `LIKE '%rolling_zscore%'` instead.
+    - Naive "TP rows / total rows" precision gets WORSE as merging correctly
+      de-duplicates true positives (measured: 0.788 at zero gap tolerance ->
+      0.696 at the shipped 30-minute tolerance), because merging collapses
+      true-positive fragments together while isolated false positives never
+      merge. Epic 4 must report detected-events / ground-truth-events for
+      recall and a raw false-positive COUNT alongside precision, not treat
+      row-level precision as the headline number on its own (Epic 3 review
+      round 2, #6).
     """
     non_empty = [d for d in dfs if not d.empty]
     if not non_empty:
@@ -82,7 +96,10 @@ def run_detector() -> pd.DataFrame:
         zscore_df = rolling_zscore.detect(events_df)
         seasonal_df = seasonal_residual.detect(events_df)
         merged = merge_detections(zscore_df, seasonal_df)
-        merged = merged.reset_index(drop=True)
+        # Chronological, not (service, metric_name) group order — otherwise
+        # `ORDER BY id` downstream looks chronological and isn't (Epic 3
+        # review round 2, nit #10).
+        merged = merged.sort_values("start_ts").reset_index(drop=True)
         merged.insert(0, "id", range(len(merged)))
 
         conn.execute("BEGIN TRANSACTION")
