@@ -42,7 +42,7 @@ def merge_detections(*dfs: pd.DataFrame) -> pd.DataFrame:
     - Naive "TP rows / total rows" precision gets WORSE as merging correctly
       de-duplicates true positives, because merging collapses true-positive
       fragments together while isolated false positives never merge (measured
-      at the round-2 window=12 default: 0.788 at zero gap tolerance -> 0.696
+      at the round-1 window=12 default: 0.788 at zero gap tolerance -> 0.696
       at 30 minutes; re-measured at the current window=48 default: 0.963 ->
       0.941 — same direction, current numbers). Epic 4 must report
       detected-events / ground-truth-events for recall and a raw

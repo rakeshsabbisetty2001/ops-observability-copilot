@@ -38,7 +38,8 @@ def flags_to_windows(
     #4, measured: a 40-sigma single-point spike produced zero detections
     from either detector). Measured cost of the escape at the current
     window=48 default, 80,000 points of clean noise: 0 (round 1's window=12
-    measurement was ~1 in 80,000; the wider baseline is strictly cheaper).
+    measurement was ~1 in 80,000; both measure 0 at the current default, so
+    "cheaper" isn't measured — only "no more expensive").
     """
     idx = g.index[flagged].tolist()
     if not idx:
