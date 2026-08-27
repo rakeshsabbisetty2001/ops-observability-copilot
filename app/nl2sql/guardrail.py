@@ -42,6 +42,27 @@ from app.db import QUERYABLE_TABLES
 
 DEFAULT_ROW_LIMIT = 500
 
+# Every table-reference node type DuckDB 1.1.3's parser can produce from a
+# parseable SELECT (enumerated exhaustively during Epic 5 review round 3 by
+# serializing ~40 constructs and structurally detecting every table-ref
+# dict). Anything encountered that ISN'T one of these is rejected outright
+# (see the "unrecognized table reference" check in _walk) — the walker used
+# to silently pass through any node type it didn't explicitly recognize,
+# which is exactly the posture that produced round 1's regex gap and round
+# 2's SHOW_REF gap. Failing closed on an unknown type is the version of this
+# check that survives a DuckDB upgrade adding a ninth type.
+_SAFE_TABLEREF_TYPES = frozenset({"SUBQUERY", "JOIN", "EXPRESSION_LIST", "EMPTY", "PIVOT"})
+_REJECTED_TABLEREF_TYPES = frozenset({"TABLE_FUNCTION", "SHOW_REF"})
+# BASE_TABLE is handled separately (it needs the allowlist/CTE logic, not a
+# blanket accept/reject).
+
+# Table functions that only ever produce computed/literal rows — no file,
+# network, or catalog access under any arguments — so they're safe to allow
+# even though every other table function is rejected outright. Recovers
+# ordinary time-bucketing SQL ("generate_series(min_ts, max_ts, INTERVAL 1
+# HOUR)") that a model reaches for naturally (Epic 5 review round 3, nit #5).
+_SAFE_TABLE_FUNCTIONS = frozenset({"range", "generate_series", "unnest"})
+
 
 class GuardrailRejection(Exception):
     """Raised when generated SQL fails the guardrail. The message is a
@@ -97,16 +118,49 @@ def _walk(node, visible_ctes: frozenset, disallowed_tables: set, disallowed_sour
         if node_type == "BASE_TABLE":
             name = node.get("table_name", "").lower()
             qualified = bool(node.get("schema_name")) or bool(node.get("catalog_name"))
-            is_cte_reference = not qualified and name in visible_ctes
-            if not is_cte_reference:
+            if qualified:
+                # The app never needs a qualified reference — schema_prompt
+                # only ever names bare table names — so reject outright
+                # rather than trying to validate "is this qualifier really
+                # this database's own main schema", which is one more name
+                # to get wrong (Epic 5 review round 3, #3: `memory.main.
+                # events` passed because only the bare last component was
+                # checked).
                 all_real_tables.add(name)
-                if name not in QUERYABLE_TABLES:
-                    disallowed_tables.add(name)
+                disallowed_tables.add(
+                    f"{node.get('catalog_name', '')}.{node.get('schema_name', '')}.{name}".strip(".")
+                )
+            else:
+                is_cte_reference = name in visible_ctes
+                if not is_cte_reference:
+                    all_real_tables.add(name)
+                    if name not in QUERYABLE_TABLES:
+                        disallowed_tables.add(name)
         elif node_type == "TABLE_FUNCTION":
             fn = node.get("function", {})
-            disallowed_sources.add(fn.get("function_name", "<unknown function>"))
+            fn_name = fn.get("function_name", "<unknown function>")
+            if fn_name.lower() not in _SAFE_TABLE_FUNCTIONS:
+                disallowed_sources.add(fn_name)
         elif node_type == "SHOW_REF":
             disallowed_sources.add(f"SHOW/DESCRIBE/SUMMARIZE: {node.get('table_name', '?')}")
+        elif (
+            isinstance(node_type, str)
+            and node_type not in _SAFE_TABLEREF_TYPES
+            and node_type not in _REJECTED_TABLEREF_TYPES
+            and "sample" in node
+            and "alias" in node
+            and "class" not in node
+        ):
+            # A dict shaped like a table reference (every real one carries
+            # both `sample` and `alias`, and never `class` — expression
+            # nodes always carry `class`; `type` on a non-table-ref node can
+            # also be a nested dict rather than a string, e.g. a literal's
+            # value type, so the isinstance check comes first) but of a type
+            # this walker has never seen: fail closed rather than silently
+            # allowing it through (Epic 5 review round 3, #1 — validated
+            # against the full enumerated corpus: 8/8 known types matched,
+            # zero false positives on ordinary expression nodes).
+            disallowed_sources.add(f"unrecognized table reference: {node_type}")
 
         local_ctes = visible_ctes
         cte_map = node.get("cte_map")

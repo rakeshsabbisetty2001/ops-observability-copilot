@@ -89,6 +89,46 @@ def test_show_describe_summarize_as_a_data_source_rejected(sql):
         validate_and_prepare(sql)
 
 
+def test_qualified_table_reference_rejected_even_when_the_name_is_allowed():
+    """The allowlist matched only the bare last component, so a qualified
+    reference to an ALLOWED name's own catalog/schema passed unexamined —
+    the app never needs a qualified reference at all (Epic 5 review round
+    3, #3)."""
+    for sql in ["SELECT * FROM memory.main.events", "SELECT * FROM main.events", "SELECT * FROM ops.main.events"]:
+        with pytest.raises(GuardrailRejection):
+            validate_and_prepare(sql)
+
+
+def test_pure_computation_table_functions_are_allowed():
+    """generate_series/range/unnest never touch a file, network, or catalog
+    under any arguments, so they're safe to allow even though every other
+    table function is rejected outright — recovers ordinary time-bucketing
+    SQL a model reaches for naturally (Epic 5 review round 3, nit #5)."""
+    for sql in [
+        "SELECT * FROM events, generate_series(1, 10) t(i)",
+        "SELECT * FROM events, range(10)",
+        "SELECT * FROM events, unnest([1,2,3]) t(i)",
+    ]:
+        assert "LIMIT" in validate_and_prepare(sql)
+    # but a function-only query with no allowed table still needs one
+    with pytest.raises(GuardrailRejection):
+        validate_and_prepare("SELECT * FROM range(10)")
+
+
+def test_unrecognized_table_reference_type_fails_closed():
+    """The walker used to silently allow any node type it didn't
+    specifically recognize — the exact posture behind both prior rounds'
+    bypasses. Simulate a hypothetical future/unknown table-ref node type
+    directly against the internal walker to confirm the default is now
+    reject, not allow (Epic 5 review round 3, #1)."""
+    from app.nl2sql.guardrail import _walk
+
+    fake_node = {"type": "SOME_FUTURE_NODE_TYPE", "sample": None, "alias": "", "table_name": "whatever"}
+    disallowed_tables, disallowed_sources, all_real_tables = set(), set(), set()
+    _walk(fake_node, frozenset(), disallowed_tables, disallowed_sources, all_real_tables)
+    assert disallowed_sources, "an unrecognized table-ref-shaped node must be flagged, not silently allowed"
+
+
 def test_cte_over_allowed_tables_is_now_supported():
     """A regex-based guardrail could not safely tell a CTE name from a real
     table reference, so CTEs were rejected outright — the parser-based

@@ -9,10 +9,13 @@ connection open with a different read_only value, so a per-call write
 connection to ops.duckdb would collide with the read-only query connection
 under real concurrency; reproduced live during Epic 5's review, round 1 #3).
 """
+import logging
 import threading
 import time
 
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
 
 from app.db import QUERY_LOG_TABLE_SQL, get_connection, get_query_log_connection
 from app.nl2sql.generate import generate_sql
@@ -70,6 +73,18 @@ class _AbandonedWorkerError(TimeoutError):
     connection object is a far smaller cost than a process-wide hang."""
 
 
+# ponytail: unbounded — each abandoned worker is a permanently-running
+# thread on a shared memory_limit budget, and this only counts/logs them
+# rather than capping how many can pile up. A real abandonment is rare in
+# practice (interrupt() succeeds within 1-3 attempts the overwhelming
+# majority of the time, measured during review), so this is enough to make
+# the ceiling visible without adding real throttling machinery for a
+# failure mode that hasn't happened yet — cap it if this ever serves real
+# concurrent traffic (Epic 5 review round 3, #4).
+_abandoned_worker_count = 0
+_abandoned_worker_count_lock = threading.Lock()
+
+
 def _execute_with_timeout(conn, sql: str, timeout_seconds: float) -> pd.DataFrame:
     """DuckDB has no built-in statement timeout — run the query on a worker
     thread and conn.interrupt() it from here if it overruns, so one
@@ -90,11 +105,22 @@ def _execute_with_timeout(conn, sql: str, timeout_seconds: float) -> pd.DataFram
     worker.start()
     worker.join(timeout_seconds)
     if worker.is_alive():
-        for _ in range(5):  # a few interrupt attempts, not an infinite loop
+        # 3 attempts at 0.5s: the first attempt is what resolves it in
+        # practice (measured 10/10 within iterations 1-3 during review) —
+        # worst-case added latency is ~1.5s, not the ~5s a longer loop would
+        # add on top of the timeout itself (Epic 5 review round 3, nit #6:
+        # _QUERY_TIMEOUT_SECONDS should still roughly describe the
+        # user-visible ceiling).
+        for _ in range(3):
             conn.interrupt()
-            worker.join(1)
+            worker.join(0.5)
             if not worker.is_alive():
                 raise TimeoutError(f"query exceeded {timeout_seconds}s timeout")
+        with _abandoned_worker_count_lock:
+            global _abandoned_worker_count
+            _abandoned_worker_count += 1
+            count = _abandoned_worker_count
+        _logger.warning("query timed out and could not be interrupted (abandoned workers so far: %d)", count)
         raise _AbandonedWorkerError(f"query exceeded {timeout_seconds}s timeout and could not be interrupted")
     if "error" in outcome:
         raise outcome["error"]
@@ -123,6 +149,16 @@ def ask(question: str) -> dict:
             result_df = _execute_with_timeout(conn, safe_sql, _QUERY_TIMEOUT_SECONDS)
         except _AbandonedWorkerError:
             raise  # do NOT close conn here — see _AbandonedWorkerError's docstring
+        except BaseException:
+            # Every OTHER failure (a plain TimeoutError once the worker did
+            # die, or the worker's own re-raised exception — a BinderException
+            # from a hallucinated column, OutOfMemoryException, etc.) skipped
+            # this close entirely under the old except/else split, leaving
+            # release to depend on CPython refcounting rather than an
+            # explicit call (Epic 5 review round 3, #2 — confirmed via an
+            # instrumented count: 0 explicit closes on this exact path).
+            conn.close()
+            raise
         else:
             conn.close()
 
