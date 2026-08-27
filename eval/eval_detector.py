@@ -163,15 +163,25 @@ def run_eval() -> dict:
     # Tripwire: this eval's own detect() calls must actually be the same
     # detector run that produced the committed detected_anomalies, or the
     # per-detector breakdown above silently describes a different detector
-    # than the overall numbers below it (round 2, #3 — true today only
-    # because both call sites happen to use the same defaults; nothing
-    # enforced that before this assertion).
+    # than the overall numbers below it (round 2, #3). Compares CONTENT, not
+    # just row count — a bare length check has real blind spots on this
+    # corpus (round 3, #1: rolling_zscore window in {60, 72, 96, 192} all
+    # also produce exactly 17 merged rows, with different content, and the
+    # length-only version of this assert did not fire against any of them).
+    def _row_key(df: pd.DataFrame) -> list:
+        cols = df[["service", "metric_name", "start_ts", "end_ts", "method"]].copy()
+        cols["start_ts"] = pd.to_datetime(cols["start_ts"])
+        cols["end_ts"] = pd.to_datetime(cols["end_ts"])
+        return sorted(cols.itertuples(index=False, name=None))
+
     reconstructed = merge_detections(zscore_df, seasonal_df)
-    assert len(reconstructed) == len(det), (
-        f"eval_detector's own detect() calls produced {len(reconstructed)} merged rows but "
-        f"detected_anomalies has {len(det)} — scripts/run_detector.py's parameters have "
-        f"drifted from this eval's; re-run python -m scripts.run_detector or update this module"
-    )
+    if _row_key(reconstructed) != _row_key(det):
+        raise RuntimeError(
+            f"eval_detector's own detect() calls produced {len(reconstructed)} merged rows "
+            f"with different content than detected_anomalies' {len(det)} rows — "
+            f"scripts/run_detector.py's parameters have drifted from this eval's; re-run "
+            f"python -m scripts.run_detector or update this module"
+        )
 
     by_method_postmerge = {}
     for method, sub in det.groupby("method"):

@@ -48,7 +48,7 @@ Bucketed on magnitude **in units of the metric's own noise (σ)**, not raw units
 | `rolling_zscore` (window=144) | **11/11 = 1.000** | **9/17** |
 | `seasonal_residual` | 26/26 = 1.000 | 15/17 |
 
-**`rolling_zscore` is corroborating, not additive, on this corpus, at either window.** Every ground-truth window it finds — at window=48 or window=144 — is one `seasonal_residual` already found (0 unique recall at every window size from 24 to 288 samples, measured during Epic 3's review; verified again here that `rolling_zscore`'s window=144 hit set is a strict subset of `seasonal_residual`'s). Its honest contribution is "confirms N of the 15 found windows" — a real, reportable finding about how the two methods relate on this data, not a flaw in either method. `window=144` confirms nearly twice as many (9 vs 5) at perfect standalone precision, which is why the merged table below looks better at that setting too.
+**`rolling_zscore` is corroborating, not additive, on this corpus, at either window.** Every ground-truth window it finds — at window=48 or window=144 — is one `seasonal_residual` already found (0 unique recall at every window size from 24 to 288 samples, measured during Epic 3's review; verified again here that `rolling_zscore`'s window=144 hit set is a strict subset of `seasonal_residual`'s). Its honest contribution is "confirms 5 of the 15 found windows at the shipped default (9 at `window=144`)" — a real, reportable finding about how the two methods relate on this data, not a flaw in either method. `window=144` confirms nearly twice as many (9 vs 5) at perfect standalone precision, which is why the merged table below looks better at that setting too.
 
 ## Per merged-row method combination (post-merge — different from the table above)
 
