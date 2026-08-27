@@ -17,7 +17,9 @@ import pandas as pd
 from app.detection._windows import flags_to_windows
 
 
-def detect(events_df: pd.DataFrame, threshold: float = 3.0, min_run: int = 2) -> pd.DataFrame:
+def detect(
+    events_df: pd.DataFrame, threshold: float = 3.0, min_run: int = 2, extreme_z: float = 8.0
+) -> pd.DataFrame:
     rows: list[dict] = []
     for (service, metric), group in events_df.groupby(["service", "metric_name"]):
         g = group.sort_values("ts").reset_index(drop=True)
@@ -36,7 +38,9 @@ def detect(events_df: pd.DataFrame, threshold: float = 3.0, min_run: int = 2) ->
         scale = mad if mad > 0 else residual.std()
         z = residual / scale if scale > 0 else residual * 0.0
         rows.extend(
-            flags_to_windows(g, z.abs() > threshold, z, "seasonal_residual", service, metric, min_run=min_run)
+            flags_to_windows(
+                g, z.abs() > threshold, z, "seasonal_residual", service, metric, min_run=min_run, extreme_z=extreme_z
+            )
         )
 
     return pd.DataFrame(rows, columns=["service", "metric_name", "start_ts", "end_ts", "method", "score", "sample_event_ids"])

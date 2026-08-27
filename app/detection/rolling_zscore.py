@@ -10,7 +10,14 @@ warm-up worth of points regardless of how long the real anomaly lasts, and
 the return to normal afterward can itself score as a (phantom) anomaly since
 the baseline hasn't caught up yet. Reports onset and recovery, not the full
 span. Epic 4 must score by temporal overlap with ground truth, never by
-span-coverage percentage (Epic 3 review round 1, #2)."""
+span-coverage percentage (Epic 3 review round 1, #2).
+
+Also: the first `window` points of every (service, metric_name) series are
+unscoreable (`min_periods=window` on a shift(1)'d rolling calc) — at the
+default window=48 that's a ~4-hour blind spot at the head of each series,
+and a series shorter than window+1 points yields nothing from this detector
+at all. Epic 4 should exclude that warm-up region from the eval denominator
+rather than count it as missed coverage (Epic 3 review round 3, #4)."""
 import numpy as np
 import pandas as pd
 
@@ -18,7 +25,11 @@ from app.detection._windows import flags_to_windows
 
 
 def detect(
-    events_df: pd.DataFrame, window: int = 48, threshold: float = 3.0, min_run: int = 2
+    events_df: pd.DataFrame,
+    window: int = 48,
+    threshold: float = 3.0,
+    min_run: int = 2,
+    extreme_z: float = 8.0,
 ) -> pd.DataFrame:
     # window=48 (4 hours at 5-min resolution), not 12 (1 hour): a 1-hour
     # trailing baseline is comparable in length to this corpus's anomaly
@@ -40,7 +51,9 @@ def detect(
         roll_std = prior.rolling(window=window, min_periods=window).std()
         z = (g["value"] - roll_mean) / roll_std.replace(0, np.nan)
         rows.extend(
-            flags_to_windows(g, z.abs() > threshold, z, "rolling_zscore", service, metric, min_run=min_run)
+            flags_to_windows(
+                g, z.abs() > threshold, z, "rolling_zscore", service, metric, min_run=min_run, extreme_z=extreme_z
+            )
         )
 
     return pd.DataFrame(rows, columns=["service", "metric_name", "start_ts", "end_ts", "method", "score", "sample_event_ids"])

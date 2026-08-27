@@ -40,13 +40,15 @@ def merge_detections(*dfs: pd.DataFrame) -> pd.DataFrame:
       for rows both methods caught. `WHERE method = 'rolling_zscore'` misses
       those rows; use `LIKE '%rolling_zscore%'` instead.
     - Naive "TP rows / total rows" precision gets WORSE as merging correctly
-      de-duplicates true positives (measured: 0.788 at zero gap tolerance ->
-      0.696 at the shipped 30-minute tolerance), because merging collapses
-      true-positive fragments together while isolated false positives never
-      merge. Epic 4 must report detected-events / ground-truth-events for
-      recall and a raw false-positive COUNT alongside precision, not treat
-      row-level precision as the headline number on its own (Epic 3 review
-      round 2, #6).
+      de-duplicates true positives, because merging collapses true-positive
+      fragments together while isolated false positives never merge (measured
+      at the round-2 window=12 default: 0.788 at zero gap tolerance -> 0.696
+      at 30 minutes; re-measured at the current window=48 default: 0.963 ->
+      0.941 — same direction, current numbers). Epic 4 must report
+      detected-events / ground-truth-events for recall and a raw
+      false-positive COUNT alongside precision, not treat row-level precision
+      as the headline number on its own (Epic 3 review round 2, #6; numbers
+      refreshed round 3, #3).
     """
     non_empty = [d for d in dfs if not d.empty]
     if not non_empty:

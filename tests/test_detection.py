@@ -9,8 +9,9 @@ from scripts.run_detector import merge_detections
 
 def test_flags_to_windows_min_run_directly():
     """min_run is the single most consequential knob in this epic (it took
-    the shipped table from 595 rows to 23) and was previously only covered
-    indirectly through the noise-rate test (Epic 3 review round 2, nit #9)."""
+    the shipped table from 595 rows down to 17) and was previously only
+    covered indirectly through the noise-rate test (Epic 3 review round 2,
+    nit #9)."""
     g = pd.DataFrame({"id": range(5), "ts": pd.date_range("2026-01-01", periods=5, freq="5min")})
     z = pd.Series([0.0, 4.0, 0.0, 0.0, 0.0])
 
@@ -72,6 +73,10 @@ def test_rolling_zscore_false_positive_rate_is_reasonable_on_clean_noise():
     # with real headroom, not a re-derived theoretical one, since round 1's
     # bound was independently found to be quoting the wrong quantity twice
     # (round 1: 7x too loose; round 2: point vs. window rate conflated).
+    # NOTE (round 3, nit #7): what this test actually pins down is min_run's
+    # effect (min_run=1 measures ~0.47% here and fails the bound below) —
+    # the window=48 change on its own only brings the rate to ~0.03%, still
+    # comfortably under the bound but not what's load-bearing in this test.
     n_points_total = 0
     n_flagged_points = 0
     for seed in range(20):
@@ -126,16 +131,23 @@ def test_seasonal_residual_flags_deviation_from_hourly_baseline():
     assert len(result) == 1
     row = result.iloc[0]
     assert row["start_ts"] <= ts[anomaly_idx] <= row["end_ts"]
+    # A mean/std baseline is inflated by the very spike it's scoring — on
+    # this exact fixture, reverting median/MAD back to mean/std gives score
+    # ~8.5 vs ~1003 here (Epic 3 review round 3, #1: the earlier "direct unit
+    # test" below never actually called this module, so nothing failed when
+    # reverted; this assertion runs the real detect() and does).
+    assert row["score"] > 100
 
 
-def test_seasonal_hourly_baseline_is_robust_to_a_contaminating_outlier():
-    """Direct unit test on the estimator itself, not the full detect()
-    pipeline — Epic 3 review round 2, #2 found the pipeline-level test
-    passes unchanged with the old mean/std code, because min_run=2 already
-    filters the single-point mirror false positive regardless of which
-    estimator is used. This isolates what actually changed: does one
-    contaminating outlier drag the hour-of-day baseline away from the clean
-    cluster?"""
+def test_pandas_median_is_more_robust_than_mean_to_one_outlier():
+    """NOTE: this is documentation, not a guard — it calls pandas directly,
+    never app.detection.seasonal_residual, so it passes regardless of what
+    that module does (Epic 3 review round 3, #1 caught this exact gap after
+    two prior rounds flagged the same failure shape one level up). The real
+    guard is the `score > 100` assertion in
+    test_seasonal_residual_flags_deviation_from_hourly_baseline, which calls
+    the actual detect() and does fail if median/MAD is reverted to mean/std.
+    Kept here only as a plain illustration of why median was chosen."""
     ts = pd.to_datetime([f"2026-01-0{d} 05:00" for d in range(1, 6)])
     values = np.array([100.0, 101.0, 99.0, 1000.0, 100.0])  # 4 clean, 1 outlier, same hour bucket
     df = pd.DataFrame({"ts": ts, "value": values})

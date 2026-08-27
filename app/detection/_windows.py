@@ -27,16 +27,18 @@ def flags_to_windows(
     pure Gaussian noise is a Student-t tail, not normal — ~1.4% per point,
     not the ~0.27% a naive normal-theory reading suggests) but a real
     anomaly spans several points, so requiring at least 2 consecutive flags
-    buys roughly 10x precision for a small recall cost (Epic 3 review round
-    1, #1 — measured end to end on the real corpus: 595->34 detections,
-    precision 0.074->0.794, recall 15/17->13/17).
+    buys real precision for a small recall cost (Epic 3 review round 1, #1 —
+    measured at the round-1 window=12 default: 595->34 detections, precision
+    0.074->0.794, recall 15/17->13/17; at the current window=48 default the
+    shipped merged table is 17 rows, precision 0.941, recall 15/17).
 
     The extreme_z escape exists because min_run=2 otherwise makes an
     arbitrarily large single-point spike undetectable by construction — not
     a small recall cost, an unconditional blind spot (Epic 3 review round 2,
     #4, measured: a 40-sigma single-point spike produced zero detections
-    from either detector). Measured cost of the escape on 80,000 points of
-    clean noise at threshold=3.0: |z|>=8 fires ~1 point in 80,000 (~0.0013%).
+    from either detector). Measured cost of the escape at the current
+    window=48 default, 80,000 points of clean noise: 0 (round 1's window=12
+    measurement was ~1 in 80,000; the wider baseline is strictly cheaper).
     """
     idx = g.index[flagged].tolist()
     if not idx:
