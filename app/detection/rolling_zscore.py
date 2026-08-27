@@ -1,6 +1,16 @@
 """Rolling z-score anomaly detection: flag points whose value deviates more
 than `threshold` standard deviations from a trailing rolling window's own
-mean/std, per (service, metric_name)."""
+mean/std, per (service, metric_name).
+
+Known limitation, not a bug: a trailing baseline only ever excludes the point
+under test, not that point's predecessors (see the shift(1) comment below).
+Once a sustained anomaly has run for `window` points, the whole baseline is
+itself anomalous and z collapses — coverage is pinned at roughly `window`'s
+warm-up worth of points regardless of how long the real anomaly lasts, and
+the return to normal afterward can itself score as a (phantom) anomaly since
+the baseline hasn't caught up yet. Reports onset and recovery, not the full
+span. Epic 4 must score by temporal overlap with ground truth, never by
+span-coverage percentage (Epic 3 review round 1, #2)."""
 import numpy as np
 import pandas as pd
 
