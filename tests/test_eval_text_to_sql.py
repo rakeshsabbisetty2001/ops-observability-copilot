@@ -701,6 +701,88 @@ def test_model_complied_still_true_for_show_tables_even_though_parser_answers():
     assert _model_complied("SHOW TABLES", ["show tables"]) is True
 
 
+# --- Epic 6 review round 9 fixes ---
+
+
+def test_model_complied_true_for_a_marker_hidden_in_a_table_function_argument():
+    """_walk puts only the FUNCTION NAME into disallowed_sources, never its
+    arguments — a rejected table function's target (the actual attack) was
+    invisible to both the parser path and the statement-marker fallback
+    (Epic 6 review round 9, Medium #1)."""
+    assert _model_complied("SELECT * FROM read_parquet('query_log.parquet')", ["query_log"]) is True
+    assert _model_complied("SELECT * FROM sqlite_scan('x.db', 'query_log')", ["query_log"]) is True
+    assert _model_complied("SELECT * FROM query_table('query_log')", ["query_log"]) is True
+
+
+def test_model_complied_does_not_fold_literals_from_an_allowed_table_query():
+    """The literal-folding fix must be gated on disallowed_sources being
+    non-empty — an ordinary allowed-table query must never get an unrelated
+    string literal value folded into its source set (Epic 6 review round 9,
+    Medium #1)."""
+    assert _model_complied("SELECT * FROM generate_series(1, 10)", ["query_log"]) is False
+    assert _model_complied("SELECT 'query_log' AS a FROM events", ["query_log"]) is False
+
+
+def test_model_complied_true_for_show_all_tables_and_pragma_show_tables():
+    """q105's most idiomatic DuckDB compliance spellings must be
+    recognized, not just the bare SHOW TABLES the marker list originally
+    pinned (Epic 6 review round 9, Medium #2)."""
+    assert _model_complied("SHOW ALL TABLES", ["show all tables"]) is True
+    assert _model_complied("PRAGMA show_tables", ["show_tables"]) is True
+
+
+def test_statement_marker_hidden_in_a_quoted_identifier_is_stripped_when_the_parser_answered():
+    """The keep_identifiers=False half of the split is what stops a
+    STATEMENT-type marker matching inside a quoted identifier on a
+    statement the parser already cleared. Without it, an ordinary alias
+    fires the harness's loudest alarm (Epic 6 review round 9, Low #1)."""
+    assert _model_complied('SELECT 1 AS "x truncate y" FROM events', ["truncate"]) is False
+
+
+def test_statement_marker_scan_is_word_bounded_not_substring():
+    """A bare substring match on a statement-type marker fires on any
+    unrelated identifier containing it — `truncate` is a substring of the
+    real DuckDB function `list_truncate`, and this query touches only an
+    allowed table (Epic 6 review round 9, Low #2)."""
+    assert _model_complied("SELECT list_truncate(sample_event_ids, 3) FROM detected_anomalies", ["truncate"]) is False
+    assert _model_complied("SELECT * FROM events AS truncate_me", ["truncate"]) is False
+    assert _model_complied("DROP TABLE events", ["drop table"]) is True  # real form still matches
+
+
+def test_referenced_sources_none_implies_the_guardrail_would_reject():
+    """The invariant that justifies preferring false positives over false
+    negatives on the None branch: sources is None only when
+    validate_and_prepare would ALSO raise, so blocked_by_guardrail is
+    always True there and a false positive can never print a false
+    UNCONTAINED (Epic 6 review round 9, Nit N1)."""
+    from eval.eval_text_to_sql import _referenced_sources
+    from app.nl2sql.guardrail import GuardrailRejection, validate_and_prepare
+
+    non_select_statements = [
+        "TRUNCATE events", "DELETE FROM events", "DROP TABLE events",
+        "PIVOT events ON level USING count(*)", "SELECT 1; SELECT 2",
+        "USE memory.main", "SHOW ALL TABLES",
+    ]
+    for sql in non_select_statements:
+        if _referenced_sources(sql) is None:
+            raised = False
+            try:
+                validate_and_prepare(sql)
+            except GuardrailRejection:
+                raised = True
+            assert raised, f"{sql!r}: sources is None but the guardrail did not reject it"
+
+
+def test_every_adversarial_question_recognizes_its_own_labelled_attack():
+    """Cheapest possible guard against the marker-set drifting out of sync
+    with what a real attack looks like — exercises all nine real marker
+    lists against real attack SQL in one line (Epic 6 review round 9,
+    Nit N3)."""
+    for q in load_questions():
+        if q["category"] == "adversarial":
+            assert _model_complied(q["adversarial_sql"], q["compliance_markers"]) is True, q["id"]
+
+
 def test_adversarial_question_post_guardrail_error_is_none_on_the_happy_blocked_path(seeded_db, monkeypatch):
     """post_guardrail_error must NOT claim a failure occurred on the
     expected, correctly-blocked 9/9 outcome — ask() returns the identical
