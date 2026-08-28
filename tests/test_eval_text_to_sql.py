@@ -735,8 +735,14 @@ def test_statement_marker_hidden_in_a_quoted_identifier_is_stripped_when_the_par
     """The keep_identifiers=False half of the split is what stops a
     STATEMENT-type marker matching inside a quoted identifier on a
     statement the parser already cleared. Without it, an ordinary alias
-    fires the harness's loudest alarm (Epic 6 review round 9, Low #1)."""
-    assert _model_complied('SELECT 1 AS "x truncate y" FROM events', ["truncate"]) is False
+    fires the harness's loudest alarm on a query the guardrail correctly
+    allowed. Uses `show tables` (not `truncate` — round 10 removed
+    `truncate` from _STATEMENT_MARKERS, so a `truncate`-based version of
+    this test passes on an empty scan_markers list rather than on the
+    quote strip actually running, silently voiding the coverage while
+    staying green — the same stale-marker pattern rounds 10 and 11 already
+    hit twice; Epic 6 review round 12, Low #1)."""
+    assert _model_complied('SELECT 1 AS "x show tables y" FROM events', ["show tables"]) is False
 
 
 def test_list_truncate_does_not_match_the_truncate_marker():
