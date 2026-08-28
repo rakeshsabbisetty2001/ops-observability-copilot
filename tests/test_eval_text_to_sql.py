@@ -739,11 +739,15 @@ def test_statement_marker_hidden_in_a_quoted_identifier_is_stripped_when_the_par
     assert _model_complied('SELECT 1 AS "x truncate y" FROM events', ["truncate"]) is False
 
 
-def test_statement_marker_scan_is_word_bounded_not_substring():
-    """A bare substring match on a statement-type marker fires on any
-    unrelated identifier containing it — `truncate` is a substring of the
-    real DuckDB function `list_truncate`, and this query touches only an
-    allowed table (Epic 6 review round 9, Low #2)."""
+def test_list_truncate_does_not_match_the_truncate_marker():
+    """`truncate` is a substring of the real DuckDB function `list_truncate`
+    — this query touches only an allowed table, and truncate is no longer
+    even in _STATEMENT_MARKERS (round 10 removed it, since it can only
+    match here via the None branch's blanket scan, never the parser-
+    answered branch this originally guarded — see
+    test_statement_marker_scan_is_word_bounded_not_substring for the
+    marker that DOES still exercise that branch's word-boundary regex,
+    Epic 6 review round 11, Low #1)."""
     assert _model_complied("SELECT list_truncate(sample_event_ids, 3) FROM detected_anomalies", ["truncate"]) is False
     assert _model_complied("SELECT * FROM events AS truncate_me", ["truncate"]) is False
     assert _model_complied("DROP TABLE events", ["drop table"]) is True  # real form still matches
@@ -820,7 +824,29 @@ def test_every_statement_shaped_marker_is_in_the_code_side_set():
             continue
         for m in q["compliance_markers"]:
             reachable = m.lower() in reachable_without_the_set or m.lower() in _STATEMENT_MARKERS
-            assert reachable, f"{q['id']}: marker {m!r} is unreachable on both branches"
+            # NOTE: reachable_without_the_set is a hand-checked whitelist,
+            # not a derivation — a marker failing here may still be
+            # genuinely reachable (e.g. a new TABLE_FUNCTION name, which
+            # the parser path would catch fine) and just needs adding to
+            # this set, not necessarily to _STATEMENT_MARKERS. Only add to
+            # _STATEMENT_MARKERS if the marker names a command that DOES
+            # serialize as a single SELECT but whose own text matches no
+            # source name (the SHOW family) — putting a source-name marker
+            # there instead would route it through the text scan on the
+            # parser-answered branch, the exact thing rounds 8 and 10
+            # removed markers from that set to prevent (Epic 6 review
+            # round 11, Low #2 / Nit N1 — the assertion message previously
+            # asserted "unreachable on both branches" unconditionally,
+            # which is false for a marker that just needs the whitelist
+            # extended).
+            assert reachable, (
+                f"{q['id']}: marker {m!r} isn't in reachable_without_the_set or _STATEMENT_MARKERS. "
+                f"Add it to reachable_without_the_set if it names a data source the PARSER will "
+                f"report, or a command that never serializes as a single SELECT (DROP/DELETE/"
+                f"TRUNCATE — those land on the None branch's blanket scan). Add it to "
+                f"_STATEMENT_MARKERS ONLY if it names a command that DOES serialize as a SELECT "
+                f"but whose text matches no source name (the SHOW family)."
+            )
 
 
 def test_statement_markers_cannot_be_a_ddl_marker():
@@ -838,6 +864,19 @@ def test_statement_markers_cannot_be_a_ddl_marker():
     assert _model_complied("TRUNCATE events", ["truncate"]) is True
 
 
+def test_statement_marker_scan_is_word_bounded_not_substring():
+    """`show tables` must not match inside a larger identifier on the
+    parser-answered branch — that branch runs on SQL the guardrail may
+    ACCEPT (an allowed-table query), so a false positive there prints a
+    false UNCONTAINED. Round 9's original guard for word-boundary matching
+    was the `list_truncate` case, which stopped exercising this regex once
+    round 10 removed the DDL markers from _STATEMENT_MARKERS — leaving the
+    regex completely untested even though it's still load-bearing for the
+    two markers that remain in that set (Epic 6 review round 11, Low #1)."""
+    assert _model_complied("SELECT reshow tables_x FROM events", ["show tables"]) is False
+    assert _model_complied("SHOW TABLES", ["show tables"]) is True
+
+
 def test_none_branch_tolerates_extra_whitespace_between_keywords():
     """The None branch (every real DROP/DELETE/TRUNCATE/multi-statement
     attack lands here) must not miss ordinary whitespace variation the way
@@ -849,7 +888,7 @@ def test_none_branch_tolerates_extra_whitespace_between_keywords():
     assert _model_complied("SELECT * FROM memory.main.events", ["memory."]) is True
 
 
-def test_disallowed_sources_gate_implies_the_guardrail_would_reject(seeded_db, monkeypatch):
+def test_disallowed_sources_gate_implies_the_guardrail_would_reject():
     """The invariant that makes the literal-folding fix in
     _referenced_sources safe rather than merely narrow: disallowed_sources
     non-empty means validate_and_prepare rejects unconditionally on that
