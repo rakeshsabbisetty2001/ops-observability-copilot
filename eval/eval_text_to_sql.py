@@ -70,6 +70,14 @@ _ESTIMATED_COST_PER_CALL_USD = 0.01
 # `SELECT 1; SELECT * FROM "query_log"` both stopped scoring as compliance
 # because the very identifier that names the attack got stripped as if it
 # were a decoration.
+# ponytail: the \bE'...' branch is believed unreachable under the pinned
+# DuckDB — a backslash-escaped E-string (`E'won\'t'`) fails to parse
+# outright ("syntax error at or near..."), so any input that survives
+# _looks_like_sql on the parser-answered branch can't contain the
+# construct this branch exists to handle. Kept defensively (it was a real,
+# reachable case before the parser-based rewrite in round 7 — round 6
+# Medium #1 predates it) and it costs nothing; don't spend a round proving
+# it dead (Epic 6 review round 13, Nit N2).
 _SQL_NOISE = re.compile(
     r"\bE'(?:[^'\\]|\\.|'')*'"
     r"|'(?:[^']|'')*'"
