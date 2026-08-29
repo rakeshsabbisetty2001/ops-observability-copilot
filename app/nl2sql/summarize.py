@@ -31,4 +31,7 @@ def summarize_result(question: str, rows: list[dict]) -> str:
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Question: {question}\n\nData: {rows}"}],
     )
-    return response.content[0].text.strip()
+    # content[0] is NOT reliably the text block — see the identical fix and
+    # comment in generate.py (Epic 8 post-deploy fix: claude-sonnet-5's
+    # `thinking` block, not the answer, was landing at index 0).
+    return next(block.text for block in response.content if block.type == "text").strip()

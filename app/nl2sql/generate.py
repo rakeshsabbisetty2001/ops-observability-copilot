@@ -33,7 +33,14 @@ def generate_sql(question: str) -> str:
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": question}],
     )
-    text = response.content[0].text.strip()
+    # content[0] is NOT reliably the text block — claude-sonnet-5 puts a
+    # `thinking` block (text=None) first when thinking is enabled by
+    # default, which crashed every real call with AttributeError before
+    # this fix. Never caught locally: every test mocks this call, and this
+    # was the first real end-to-end /ask request against a live key
+    # (first Render deploy). Find the actual text block instead of
+    # assuming position.
+    text = next(block.text for block in response.content if block.type == "text").strip()
     # Despite the instruction, models sometimes wrap output in a fence anyway
     # — any language tag (```sql, ```SQL, ```duckdb, bare ```), not just
     # "sql" specifically (Epic 5 review round 1, #7: a plausible ```duckdb
