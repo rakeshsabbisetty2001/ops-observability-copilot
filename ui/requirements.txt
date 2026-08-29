@@ -1,0 +1,11 @@
+# Scoped to just the UI — Streamlit Community Cloud looks for a
+# requirements.txt in the same directory as the entrypoint script before
+# falling back to the repo root, so this has to live here (not at the repo
+# root) to actually be picked up. The UI only ever talks to the API over
+# HTTP, so pulling in the API stack (anthropic, fastapi, duckdb, ...) would
+# just slow the build for nothing it imports. Same pattern as
+# resume-screening-ai/ui/requirements.txt and sec-filings-rag/ui/.
+pandas==2.2.3
+altair==5.5.0
+streamlit==1.41.1
+requests==2.32.3
