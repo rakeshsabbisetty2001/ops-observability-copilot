@@ -1,0 +1,6 @@
+# Test-only. Deliberately kept out of requirements.txt so the production
+# Docker image doesn't ship the test toolchain (Epic 8 review round 1, Low
+# #8 — same "don't ship what the target doesn't need" split as
+# requirements-ui.txt for the Streamlit UI).
+-r requirements.txt
+pytest==8.3.4

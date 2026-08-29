@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          # Both files: requirements-dev.txt is only `-r requirements.txt` +
+          # pytest, so keying the cache on it alone left every real
+          # dependency bump (pandas, duckdb, ...) silently invisible to the
+          # cache key — Actions would restore the stale cache, pip would
+          # still download the new wheels, and never save them because the
+          # key matched (Epic 8 review round 2, Low #6a).
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      # No ANTHROPIC_API_KEY secret needed — app/config.py's anthropic_api_key
+      # defaults to "" (no fail-fast check like Projects 1/3), and every
+      # live-API code path in tests/ is monkeypatched, not called for real.
+      - run: pytest -q

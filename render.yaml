@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: ops-observability-copilot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false # set manually in the Render dashboard - never committed
+      - key: ANTHROPIC_MODEL
+        value: "claude-sonnet-5" # matches app/config.py's default; stated here so the
+                                  # deployed model id is readable in one file (Epic 8 review round 1, nit N3)
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "10"
+      - key: MAX_BODY_BYTES
+        value: "50000" # /ask's question is capped at 1000 chars; comfortable headroom for JSON overhead
+      - key: TRUST_PROXY
+        value: "true" # Render's own proxy sits in front here — safe to trust X-Forwarded-For,
+                       # unlike local/no-proxy dev where app/config.py defaults this to false

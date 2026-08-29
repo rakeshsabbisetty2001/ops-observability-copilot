@@ -5,3 +5,19 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .git/
+# The API's own audit-trail file, gitignored and generated fresh at
+# runtime — a stale local copy must never get baked into the image.
+data/query_log.duckdb
+data/query_log.duckdb.wal
+# The eval answer key — the API process never opens this file, so it isn't
+# an exploit, but there is no reason to ship it into the public production
+# image either (Epic 8 review round 1, Low #6).
+data/ground_truth.duckdb
+# Belt-and-braces, not load-bearing today: the Dockerfile's COPY allowlist
+# (app/, data/) never includes these directories in the first place, so
+# this doesn't currently exclude anything — it's here so a future `COPY .
+# .` doesn't silently start shipping them (Epic 8 review round 1, nit N1).
+tests/
+eval/
+scripts/
+ui/

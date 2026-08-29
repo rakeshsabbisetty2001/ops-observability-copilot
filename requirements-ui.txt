@@ -1,0 +1,11 @@
+# The Streamlit UI deploys separately from the API (Streamlit Community
+# Cloud vs. Render, per the Architecture doc's API_URL split), so this lists
+# only what ui/streamlit_app.py actually imports (os, altair, pandas,
+# requests, streamlit) rather than pulling in the API's fastapi/uvicorn/
+# duckdb/anthropic tree via `-r requirements.txt` — a one-directional split
+# that kept the API image clean but would still have installed those into
+# the UI's own image for nothing it imports (Epic 7 review round 2, nit N3).
+pandas==2.2.3
+altair==5.5.0
+streamlit==1.41.1
+requests==2.32.3

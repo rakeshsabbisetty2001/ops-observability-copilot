@@ -7,5 +7,8 @@ pandas==2.2.3
 numpy==2.2.1
 anthropic==0.42.0
 python-dotenv==1.0.1
-pytest==8.3.4
+# httpx stays here even though tests are the only direct caller (TestClient) —
+# it's already a transitive dependency of anthropic (its own HTTP client), so
+# pinning it explicitly costs nothing extra in the production image.
 httpx==0.28.1
+slowapi==0.1.10

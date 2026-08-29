@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS detected_anomalies (
     end_ts TIMESTAMP,
     method VARCHAR,
     score DOUBLE,
-    sample_event_ids BIGINT[]
+    sample_event_ids BIGINT[]  -- offline/eval use only: GET /anomalies/{id}
+                                -- returns the real windowed events instead
+                                -- (Epic 7 review round 1, nit N6), not this.
 );
 """
 SCHEMA_SQL = EVENTS_TABLE_SQL + DETECTED_ANOMALIES_TABLE_SQL

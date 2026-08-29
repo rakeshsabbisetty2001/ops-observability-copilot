@@ -6,7 +6,11 @@ NL query + anomaly detection over synthetic logs/metrics. Project 4 of a 4-proje
 1. `python -m venv .venv` then activate it
 2. `pip install -r requirements.txt`
 3. Copy `.env.example` to `.env` and add your `ANTHROPIC_API_KEY`
-4. `uvicorn app.main:app --reload`
+4. `uvicorn app.main:app --reload --no-proxy-headers`
+   (`--no-proxy-headers` matters even locally: uvicorn's default `proxy_headers=True`
+   trusts `X-Forwarded-For` from a `127.0.0.1` peer, which defeats `TRUST_PROXY=false`'s
+   rate-limit protection — verified live, 30/30 forged-header requests got through a
+   10/minute limit without this flag. See the Dockerfile's `CMD` comment. Epic 8 review round 2, Medium #1.)
 
 ## Stack
 Python 3.12, FastAPI, DuckDB (embedded analytical DB), Claude (text-to-SQL), Streamlit UI.
