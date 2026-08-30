@@ -62,6 +62,16 @@ class Settings(BaseSettings):
         # pydantic-settings' own .env parsing strips it, but not every loader does.
         return v.strip() if isinstance(v, str) else v
 
+    @field_validator("frontend_origin", mode="after")
+    @classmethod
+    def strip_origin_trailing_slash(cls, v: str) -> str:
+        # A browser's Origin header is scheme+host+port with no trailing
+        # slash, so a value pasted straight from a browser address bar
+        # (Vercel's own URL comes with one) matches nothing and silently
+        # disables CORS entirely — surfacing to a user as "could not reach
+        # the API" with the API demonstrably up (review round 1, finding #2).
+        return v.rstrip("/")
+
     @field_validator("duckdb_path", "ground_truth_duckdb_path", "query_log_duckdb_path", mode="after")
     @classmethod
     def resolve_relative_to_repo_root(cls, v: str) -> str:

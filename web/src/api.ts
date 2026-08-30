@@ -2,7 +2,18 @@
 // AnomalyDetail) — kept as plain types, not a codegen step, since there are
 // only 3 endpoints and the backend contract is frozen (Epic 8).
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+// import.meta.env.VITE_* is inlined at BUILD time, not read at runtime — if
+// the var is unset when `vite build` runs, the deployed bundle would ship
+// the literal string below to every visitor's browser. `||` (not `??`) also
+// catches an env var that exists but is empty, a real shape in dashboard
+// UIs. Failing the build is safer than shipping something that can't work
+// (review round 1, finding #13).
+const API_URL = import.meta.env.VITE_API_URL || (() => {
+  if (import.meta.env.PROD) {
+    throw new Error("VITE_API_URL must be set for a production build");
+  }
+  return "http://localhost:8000";
+})();
 
 export interface AskResponse {
   question: string;
@@ -36,15 +47,31 @@ export interface AnomalyDetail extends AnomalySummary {
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   let resp: Response;
   try {
-    resp = await fetch(`${API_URL}${path}`, init);
+    // 60s: a free-tier Render cold start can legitimately take tens of
+    // seconds, and a timeout shorter than the platform's own worst case
+    // would turn a slow success into a false failure (the old Streamlit UI
+    // used 15s/30s, but had no such thing as an indefinite hang either way
+    // — this app previously had no timeout at all, review round 1, finding
+    // #4). AbortSignal.timeout needs no dependency and is baseline in every
+    // browser this app targets.
+    resp = await fetch(`${API_URL}${path}`, { ...init, signal: AbortSignal.timeout(60_000) });
   } catch {
     // Same three-way error split as the old Streamlit UI's _api_error_text —
     // a response we got at all just means non-2xx; anything else (DNS,
-    // timeout, connection refused, cold-start) never reached a server worth
-    // naming, and the backend's own URL never gets rendered to the client.
+    // timeout, connection refused, cold-start, CORS rejection) never
+    // reached a server worth naming, and the backend's own URL never gets
+    // rendered to the client.
     throw new Error("could not reach the API");
   }
   if (!resp.ok) {
+    // /ask is rate-limited to 10/minute (app/config.py) and the backend
+    // writes a message worth showing for that one status; every other
+    // non-2xx stays a bare status code deliberately — api.ts never renders
+    // a server-supplied string, to keep the backend's own URL/internals out
+    // of what reaches the page (review round 1, finding #9).
+    if (resp.status === 429) {
+      throw new Error("Too many requests — give it a minute.");
+    }
     throw new Error(`API returned ${resp.status}`);
   }
   return resp.json() as Promise<T>;

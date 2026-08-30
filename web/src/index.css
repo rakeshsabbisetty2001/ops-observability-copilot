@@ -226,15 +226,31 @@ header.app-header p {
 
 .anomaly-table th {
   text-align: left;
-  color: var(--muted);
-  font-weight: 500;
-  padding: 0.5rem 0.75rem;
+  padding: 0;
   border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  user-select: none;
 }
 
-.anomaly-table th:hover {
+.th-label {
+  display: block;
+  padding: 0.5rem 0.75rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.sort-header-btn {
+  all: unset;
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  color: var(--muted);
+  font-weight: 500;
+  font-size: inherit;
+  cursor: pointer;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+.sort-header-btn:hover {
   color: var(--text);
 }
 

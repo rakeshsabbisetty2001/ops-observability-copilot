@@ -1,6 +1,8 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, cors_origins
 
 client = TestClient(app)
 
@@ -31,3 +33,42 @@ def test_preflight_allows_post_for_ask():
     assert r.status_code == 200
     assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
     assert "POST" in r.headers.get("access-control-allow-methods", "")
+
+
+def test_cors_origins_includes_dev_default_and_configured_frontend():
+    # Direct test of the function the real app builds its allowlist from —
+    # no reload, no shared-state risk (see app/main.py's comment on why:
+    # reloading this module to exercise FRONTEND_ORIGIN broke 8 unrelated
+    # tests elsewhere that monkeypatch app.config.settings, review round 1
+    # finding #15).
+    assert cors_origins("") == ["http://localhost:5173"]
+    assert cors_origins("https://ops-copilot.vercel.app") == [
+        "http://localhost:5173",
+        "https://ops-copilot.vercel.app",
+    ]
+
+
+def test_configured_frontend_origin_is_actually_allowed_by_cors_middleware():
+    # cors_origins() being right doesn't by itself prove the middleware
+    # respects it — build a real CORSMiddleware-wrapped app from its output
+    # and make a real request, same as the two tests above do against the
+    # real app's dev origin.
+    test_app = FastAPI()
+    test_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins("https://ops-copilot.vercel.app"),
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
+
+    @test_app.get("/ping")
+    def ping():
+        return {"ok": True}
+
+    c = TestClient(test_app)
+    r = c.get("/ping", headers={"Origin": "https://ops-copilot.vercel.app"})
+    assert r.headers.get("access-control-allow-origin") == "https://ops-copilot.vercel.app"
+    # The dev default must still work alongside a configured origin, not be
+    # replaced by it.
+    r = c.get("/ping", headers={"Origin": "http://localhost:5173"})
+    assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"

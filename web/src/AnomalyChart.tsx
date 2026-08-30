@@ -26,28 +26,55 @@ export function AnomalyChart({ detail }: { detail: AnomalyDetail }) {
   return (
     <ResponsiveContainer width="100%" height={280}>
       <LineChart data={data} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
-        <CartesianGrid stroke="#262b33" strokeDasharray="3 3" />
+        <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
         <XAxis
           dataKey="ts"
           type="number"
           domain={["dataMin", "dataMax"]}
           tickFormatter={(t) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-          stroke="#9aa2ad"
+          stroke="var(--muted)"
           tick={{ fontSize: 11 }}
         />
-        <YAxis stroke="#9aa2ad" tick={{ fontSize: 11 }} label={{ value: detail.metric_name, angle: -90, position: "insideLeft", fill: "#9aa2ad", fontSize: 11 }} />
+        <YAxis stroke="var(--muted)" tick={{ fontSize: 11 }} label={{ value: detail.metric_name, angle: -90, position: "insideLeft", fill: "var(--muted)", fontSize: 11 }} />
         <Tooltip
           labelFormatter={(t) => new Date(t as number).toLocaleString()}
-          contentStyle={{ background: "#14171c", border: "1px solid #262b33", borderRadius: 8, fontSize: 12 }}
+          contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
         />
         <ReferenceArea
           x1={new Date(detail.start_ts).getTime()}
           x2={new Date(detail.end_ts).getTime()}
-          fill="#ff4b4b"
+          // Recharts' default (ifOverflow="discard") drops the whole band —
+          // silently, no error — the moment either edge falls outside the
+          // axis domain (["dataMin","dataMax"], i.e. the events actually
+          // returned). The endpoint's own event LIMIT (app/main.py) means a
+          // wide anomaly can legitimately have its window extend past what
+          // was returned; extendDomain stretches the axis to fit instead,
+          // which also makes any such truncation visible as empty space
+          // rather than hiding the one visual this chart exists to show
+          // (review round 1, finding #8 — verified not currently live
+          // against the real corpus, but a silent failure mode worth
+          // closing for one attribute).
+          ifOverflow="extendDomain"
+          fill="var(--danger)"
           fillOpacity={0.15}
           stroke="none"
         />
-        <Line type="monotone" dataKey="value" stroke="#6ee7b7" dot={{ r: 2 }} strokeWidth={1.5} isAnimationActive={false} />
+        <Line
+          type="linear" // not "monotone" — the metric is sampled, not continuous, and a
+          // spline invents curvature between points that was never measured,
+          // softening exactly the sharp transitions that make a spike
+          // legible against the shaded window (review round 1, finding #16;
+          // the Altair original this replaces used a plain, unsmoothed line).
+          dataKey="value"
+          name={detail.metric_name} // otherwise the tooltip's series label is the literal
+          // string "value" instead of e.g. "latency_ms" (review round 1, N3).
+          stroke="var(--accent)"
+          dot={data.length <= 200} // a capped response can return up to 2000 points; an
+          // unconditional dot on all of them is 2000 SVG circles for no
+          // visual gain past a certain density (review round 1, N4).
+          strokeWidth={1.5}
+          isAnimationActive={false}
+        />
       </LineChart>
     </ResponsiveContainer>
   );

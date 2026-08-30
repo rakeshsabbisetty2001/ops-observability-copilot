@@ -23,15 +23,31 @@ app.add_middleware(BodySizeLimitMiddleware)
 
 # The React frontend (web/) calls this API via browser `fetch`, unlike the old
 # Streamlit UI which called it server-side and never triggered a CORS check.
-# Origins list always includes the Vite dev default so local frontend dev
-# works without env setup; the deployed origin comes from settings so it's
-# not hardcoded (Render env var, same pattern as ANTHROPIC_MODEL etc.).
-_cors_origins = ["http://localhost:5173"]
-if settings.frontend_origin:
-    _cors_origins.append(settings.frontend_origin)
+
+
+def cors_origins(frontend_origin: str) -> list[str]:
+    # Pulled out as its own function so the FRONTEND_ORIGIN branch is
+    # testable directly against an arbitrary input, without reloading this
+    # module (reload desyncs the app.config.settings singleton that other
+    # test files' monkeypatch.setattr(config_module.settings, ...) calls
+    # depend on being the SAME object app.db reads from — verified this
+    # broke 8 unrelated tests in test_write_to_db.py/test_run_detector.py
+    # when tried; see tests/test_cors.py, review round 1 finding #15).
+    # Always includes the Vite dev default so local frontend dev works
+    # without env setup; the deployed origin comes from settings, not
+    # hardcoded (Render env var, same pattern as ANTHROPIC_MODEL etc.).
+    # config.py's own validator already strips a trailing slash from
+    # frontend_origin before this ever runs (review round 1, finding #2) —
+    # this function trusts that, rather than stripping again.
+    origins = ["http://localhost:5173"]
+    if frontend_origin:
+        origins.append(frontend_origin)
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=cors_origins(settings.frontend_origin),
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
