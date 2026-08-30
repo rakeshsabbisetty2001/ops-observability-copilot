@@ -44,8 +44,16 @@ class Settings(BaseSettings):
     # proxy that overwrites/appends this header itself.
     trust_proxy: bool = False
 
+    # The React frontend's deployed origin (e.g. https://ops-copilot.vercel.app) —
+    # no scheme-less/wildcard value here, since /ask is a real (if cheap) LLM call
+    # and CORSMiddleware's allow_origins is the only thing standing between it and
+    # any other site's browser JS. Empty by default so a fresh checkout doesn't
+    # silently allow nothing-in-particular; set explicitly per environment.
+    frontend_origin: str = ""
+
     @field_validator(
         "anthropic_api_key", "anthropic_model", "duckdb_path", "ground_truth_duckdb_path", "query_log_duckdb_path",
+        "frontend_origin",
         mode="before",
     )
     @classmethod

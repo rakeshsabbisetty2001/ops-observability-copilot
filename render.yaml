@@ -18,3 +18,5 @@ services:
       - key: TRUST_PROXY
         value: "true" # Render's own proxy sits in front here — safe to trust X-Forwarded-For,
                        # unlike local/no-proxy dev where app/config.py defaults this to false
+      - key: FRONTEND_ORIGIN
+        sync: false # set manually once the React frontend has a real Vercel URL

@@ -4,10 +4,12 @@ import logging
 from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from slowapi.errors import RateLimitExceeded
 
+from app.config import settings
 from app.db import get_connection
 from app.middleware.body_limit import BodySizeLimitMiddleware
 from app.middleware.rate_limit import API_RATE_LIMIT, _client_ip, limiter
@@ -18,6 +20,21 @@ logger = logging.getLogger("ops_copilot.api")
 app = FastAPI(title="AI Ops Observability Copilot")
 app.state.limiter = limiter
 app.add_middleware(BodySizeLimitMiddleware)
+
+# The React frontend (web/) calls this API via browser `fetch`, unlike the old
+# Streamlit UI which called it server-side and never triggered a CORS check.
+# Origins list always includes the Vite dev default so local frontend dev
+# works without env setup; the deployed origin comes from settings so it's
+# not hardcoded (Render env var, same pattern as ANTHROPIC_MODEL etc.).
+_cors_origins = ["http://localhost:5173"]
+if settings.frontend_origin:
+    _cors_origins.append(settings.frontend_origin)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 @app.exception_handler(RateLimitExceeded)

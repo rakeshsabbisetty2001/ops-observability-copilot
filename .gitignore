@@ -8,3 +8,4 @@ __pycache__/
 .DS_Store
 data/query_log.duckdb
 data/query_log.duckdb.wal
+graphify-out/
