@@ -16,5 +16,12 @@ def test_frontend_origin_without_trailing_slash_is_unchanged():
     assert s.frontend_origin == "https://ops-copilot.vercel.app"
 
 
-def test_frontend_origin_empty_by_default():
-    assert Settings().frontend_origin == ""
+def test_frontend_origin_empty_by_default(monkeypatch):
+    # Settings() also reads the real process environment (on top of .env),
+    # so without this the test would fail on any machine/CI runner that
+    # happens to have FRONTEND_ORIGIN set — exactly the machine someone is
+    # using to debug a CORS problem (review round 2, NEW-6). The other two
+    # tests in this file are immune: init kwargs outrank both env sources in
+    # pydantic-settings' default priority.
+    monkeypatch.delenv("FRONTEND_ORIGIN", raising=False)
+    assert Settings(_env_file=None).frontend_origin == ""

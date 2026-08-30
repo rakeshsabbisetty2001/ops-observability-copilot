@@ -2,18 +2,14 @@
 // AnomalyDetail) — kept as plain types, not a codegen step, since there are
 // only 3 endpoints and the backend contract is frozen (Epic 8).
 
-// import.meta.env.VITE_* is inlined at BUILD time, not read at runtime — if
-// the var is unset when `vite build` runs, the deployed bundle would ship
-// the literal string below to every visitor's browser. `||` (not `??`) also
-// catches an env var that exists but is empty, a real shape in dashboard
-// UIs. Failing the build is safer than shipping something that can't work
-// (review round 1, finding #13).
-const API_URL = import.meta.env.VITE_API_URL || (() => {
-  if (import.meta.env.PROD) {
-    throw new Error("VITE_API_URL must be set for a production build");
-  }
-  return "http://localhost:8000";
-})();
+// import.meta.env.VITE_* is inlined at BUILD time, not read at runtime.
+// vite.config.ts fails the build outright if VITE_API_URL is unset for a
+// production build — a module-scope throw here compiles fine and ships (the
+// build still exits 0), which trades an in-app error message for a
+// completely blank deployed page; review round 2, NEW-1. `||` (not `??`)
+// also catches an env var that exists but is empty, a real shape in
+// dashboard UIs (review round 1, finding #13).
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 export interface AskResponse {
   question: string;

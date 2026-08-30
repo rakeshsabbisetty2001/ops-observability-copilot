@@ -20,13 +20,16 @@ const MAX_CHAT_TURNS = 50; // ported from ui/streamlit_app.py
 
 type SortKey = "start_ts" | "score" | "service" | "metric_name";
 
-// Shared by StatTile's count-up and Drilldown's auto-scroll — read once,
-// not per-component, since both want the same answer to the same query.
+// Shared by StatTile's count-up and Drilldown's auto-scroll — read once per
+// component instance, not per render. useState's lazy initialiser (a
+// function) runs only on mount; useRef's argument is an ordinary expression
+// re-evaluated on every render and discarded on all but the first — the
+// wrong tool here, since StatTile alone re-renders on every animation frame
+// of its 500ms count-up (review round 2, NEW-3). No SSR path in this app
+// (main.tsx is browser-only), so no `typeof window` guard needed.
 function usePrefersReducedMotion(): boolean {
-  const ref = useRef(
-    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
-  return ref.current;
+  const [reduceMotion] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  return reduceMotion;
 }
 
 export default function App() {
@@ -45,13 +48,18 @@ export default function App() {
   const [chatQuestion, setChatQuestion] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
 
-  // Fetched once (unfiltered) to drive the stat strip and give Browse its
-  // service/metric universe — the filtered fetch in BrowseTab is separate,
-  // this is just for the header numbers. Failure leaves allAnomalies null
-  // (not []) so the tiles show "–" instead of a fabricated 0 — a dead API
-  // is not the same fact as a detector that found nothing (review round 1,
-  // finding #3; same None-vs-[] distinction Epic 7 round 1's Low #5 fixed
-  // in the Streamlit UI).
+  // Fetched once (unfiltered), used only for the two stat tiles below —
+  // NOT passed to BrowseTab, which fetches its own list independently
+  // (its filters are free-text inputs, not a select populated from this).
+  // Both tabs staying mounted (finding #1, above) makes BrowseTab's own
+  // unfiltered fetch fire unconditionally alongside this one on every page
+  // load, including for a visitor who never opens Browse — a known,
+  // accepted duplicate cost of that fix, not something this fetch is for
+  // (review round 2, NEW-5, correcting an earlier version of this comment).
+  // Failure leaves allAnomalies null (not []) so the tiles show "–" instead
+  // of a fabricated 0 — a dead API is not the same fact as a detector that
+  // found nothing (review round 1, finding #3; same None-vs-[] distinction
+  // Epic 7 round 1's Low #5 fixed in the Streamlit UI).
   useEffect(() => {
     getAnomalies("", "")
       .then(setAllAnomalies)
@@ -325,7 +333,14 @@ function BrowseTab({ onDrilldown }: { onDrilldown: (id: number) => void }) {
                   key={a.id}
                   className="row-clickable"
                   tabIndex={0}
-                  role="button"
+                  // Not role="button" — that overrides <tr>'s implicit
+                  // role="row", making every data row an invalid child of
+                  // its rowgroup and breaking screen-reader table
+                  // navigation (row/column arrowing, header association).
+                  // tabIndex alone makes the row focusable and keyboard-
+                  // operable without touching its role; [tabindex]:focus-
+                  // visible in index.css keys off the attribute, not the
+                  // role (review round 2, NEW-2).
                   onClick={() => onDrilldown(a.id)}
                   onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onDrilldown(a.id))}
                 >

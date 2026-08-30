@@ -26,19 +26,28 @@ export function AnomalyChart({ detail }: { detail: AnomalyDetail }) {
   return (
     <ResponsiveContainer width="100%" height={280}>
       <LineChart data={data} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
-        <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+        {/* var(--x, #hex) below, not bare var(--x) — presentation attributes
+            (as opposed to a CSS rule or inline style) historically used SVG
+            parse grammar rather than CSS, so var() resolution here is a
+            genuinely contested behaviour. Verified it resolves in the
+            Chromium this app targets, but a fallback closes the silent-
+            invisible-chart failure mode on anything that disagrees — same
+            class of risk finding #8 closed for the band (review round 2,
+            NEW-4). The fallback is the source of truth only if the token
+            fails to resolve; the CSS variable still wins everywhere else. */}
+        <CartesianGrid stroke="var(--border, #262b33)" strokeDasharray="3 3" />
         <XAxis
           dataKey="ts"
           type="number"
           domain={["dataMin", "dataMax"]}
           tickFormatter={(t) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-          stroke="var(--muted)"
+          stroke="var(--muted, #9aa2ad)"
           tick={{ fontSize: 11 }}
         />
-        <YAxis stroke="var(--muted)" tick={{ fontSize: 11 }} label={{ value: detail.metric_name, angle: -90, position: "insideLeft", fill: "var(--muted)", fontSize: 11 }} />
+        <YAxis stroke="var(--muted, #9aa2ad)" tick={{ fontSize: 11 }} label={{ value: detail.metric_name, angle: -90, position: "insideLeft", fill: "var(--muted, #9aa2ad)", fontSize: 11 }} />
         <Tooltip
           labelFormatter={(t) => new Date(t as number).toLocaleString()}
-          contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
+          contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} // a React style object -> inline style, never subject to the SVG-presentation-attribute doubt above
         />
         <ReferenceArea
           x1={new Date(detail.start_ts).getTime()}
@@ -55,7 +64,7 @@ export function AnomalyChart({ detail }: { detail: AnomalyDetail }) {
           // against the real corpus, but a silent failure mode worth
           // closing for one attribute).
           ifOverflow="extendDomain"
-          fill="var(--danger)"
+          fill="var(--danger, #ff4b4b)"
           fillOpacity={0.15}
           stroke="none"
         />
@@ -68,7 +77,7 @@ export function AnomalyChart({ detail }: { detail: AnomalyDetail }) {
           dataKey="value"
           name={detail.metric_name} // otherwise the tooltip's series label is the literal
           // string "value" instead of e.g. "latency_ms" (review round 1, N3).
-          stroke="var(--accent)"
+          stroke="var(--accent, #6ee7b7)"
           dot={data.length <= 200} // a capped response can return up to 2000 points; an
           // unconditional dot on all of them is 2000 SVG circles for no
           // visual gain past a certain density (review round 1, N4).
