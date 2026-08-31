@@ -2,7 +2,7 @@
 
 Ask your logs and metrics a question in plain English instead of writing SQL, and catch anomalies before customers do.
 
-**Live demo (UI):** https://ops-observability-copilot.streamlit.app
+**Live demo (UI):** https://ops-observability-copilot.vercel.app
 **Live API:** https://ops-observability-copilot.onrender.com
 **API docs:** https://ops-observability-copilot.onrender.com/docs (FastAPI auto-generated)
 
@@ -39,7 +39,7 @@ Metrics stream --> rolling z-score detector    --\
 - **Data store:** DuckDB, embedded — no separate managed database service. `data/ops.duckdb` holds the events/metrics corpus and `detected_anomalies`; opened `read_only=True` with `enable_external_access=false` for every query the text-to-SQL path executes, as a physical backstop independent of the app-level guardrail.
 - **Text-to-SQL guardrail:** Claude-generated SQL is parsed with DuckDB's own `json_serialize_sql()` into a real AST — not pattern-matched as text — to enforce a table/statement allowlist before anything executes. Two false starts along the way are worth naming: a regex-based table check missed comma joins, and an early CTE-scoping bug let a throwaway `WITH query_log AS (...)` whitelist every real reference to that name elsewhere in the query. Both are why the read-only/no-external-access connection exists as a second, independent layer — never trust the guardrail alone.
 - **Anomaly detection:** two independent detectors — rolling z-score (catches sudden spikes) and seasonal-residual (median-per-hour-of-day baseline with MAD-based spread, both outlier-resistant by construction, to catch drift a plain rolling mean/std would misread as normal end-of-cycle noise). Detections are merged across a tolerance window before being written to `detected_anomalies`.
-- **UI:** React/TypeScript SPA (`web/`) — a chat interface for NL questions plus a browse/drill-down view over detected anomalies, with real baseline context around each flagged window (not just the flagged points themselves). Replaces an earlier Streamlit UI (`ui/`, being phased out) with the same views plus click-to-drill-down, live filtering, sortable columns, and chart hover tooltips.
+- **UI:** React/TypeScript SPA (`web/`) — a chat interface for NL questions plus a browse/drill-down view over detected anomalies, with real baseline context around each flagged window (not just the flagged points themselves). Replaced an earlier Streamlit UI with the same views plus click-to-drill-down, live filtering, sortable columns, and chart hover tooltips.
 
 ## Production concerns handled
 
@@ -83,9 +83,7 @@ uvicorn app.main:app --reload --no-proxy-headers
 
 `--no-proxy-headers` matters even locally — see Production concerns above.
 
-React UI (`web/`, current): `cd web && npm install && npm run dev` (defaults to `http://localhost:8000`; override via `VITE_API_URL`). See `web/README.md` for build/deploy.
-
-Streamlit UI (`ui/`, being phased out): `pip install -r ui/requirements.txt && streamlit run ui/streamlit_app.py` (set `API_URL` to point at your local API).
+UI: `cd web && npm install && npm run dev` (defaults to `http://localhost:8000`; override via `VITE_API_URL`). See `web/README.md` for build/deploy.
 
 ## Stack
 
